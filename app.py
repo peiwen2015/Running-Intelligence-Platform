@@ -6,6 +6,7 @@ import json
 import calendar
 import mimetypes
 import socket
+import sqlite3
 import os
 import sys
 import subprocess
@@ -229,9 +230,61 @@ def clean_workout_focus_map(raw_map, options):
     return result
 
 
+def shoe_label_from_row(row):
+    model = str(row["model"] or "").strip()
+    nickname = str(row["nickname"] or "").strip()
+    if model and nickname:
+        return f"{model} {nickname}".strip()
+    if model:
+        return model
+    if nickname:
+        return nickname
+    return str(row["shoe_code"] or "").strip()
+
+
+def shoe_labels_from_sqlite():
+    if not SQLITE_DB_PATH.exists():
+        return []
+    try:
+        connection = sqlite3.connect(SQLITE_DB_PATH)
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT shoe_code, model, nickname, is_active
+            FROM shoe
+            ORDER BY is_active DESC, model, nickname, shoe_code
+            """
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return []
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+    labels = []
+    seen = set()
+    for row in rows:
+        label = shoe_label_from_row(row)
+        key = label.lower()
+        if not label or key in seen:
+            continue
+        seen.add(key)
+        labels.append(label)
+    return labels
+
+
 def load_app_options():
     options = load_dropdown_options(DROPDOWN_CONFIG_PATH)
     raw = load_raw_config()
+    if not raw.get("shoes"):
+        sqlite_shoes = shoe_labels_from_sqlite()
+        if sqlite_shoes:
+            options["shoes"] = sqlite_shoes
+            updated = dict(raw)
+            updated["shoes"] = sqlite_shoes
+            save_dropdown_options(updated)
     options[WORKOUT_FOCUS_MAP_KEY] = clean_workout_focus_map(raw.get(WORKOUT_FOCUS_MAP_KEY), options)
     return options
 

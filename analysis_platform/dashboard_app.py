@@ -2255,6 +2255,122 @@ def coach_desk_focus_route(today, weekly_review, monthly_overview, story, latest
     }
 
 
+def overview_ai_handoff_text(attention, weekly_review, monthly_overview, latest_activity):
+    if not attention:
+        return ""
+
+    target_surface = attention.get("target_surface") or "weekly"
+    surface_label_map = {
+        "activity": "單堂課",
+        "weekly": "週回顧",
+        "monthly": "月回顧",
+        "shoes": "鞋款",
+    }
+    target_label = surface_label_map.get(target_surface, "下一頁")
+
+    prompt_lines = [
+        "請根據以下已治理的跑步資料，用繁體中文做進一步分析。",
+        "請先回答今天最該先把注意力放在哪裡，再說明為什麼，最後建議我應該先往哪一頁繼續看。",
+        "只能根據我提供的內容分析，不要自行發明額外訓練、健康或心理狀態。",
+        "",
+        "## Overview Facts",
+        f"- Today Focus：{attention['title']}",
+        f"- Why Now：{attention['why']}",
+        f"- Primary Route：{target_label}",
+        f"- Continue Link：{attention['cta']}",
+    ]
+
+    if attention.get("secondary_note"):
+        prompt_lines.append(f"- Secondary Note：{attention['secondary_note']}")
+
+    if attention.get("evidence"):
+        prompt_lines.extend([
+            "",
+            "## Coach Attention",
+            *[f"- {item}" for item in attention["evidence"]],
+        ])
+
+    if weekly_review:
+        prompt_lines.extend([
+            "",
+            "## Weekly Context",
+            f"- Focus：{weekly_review['focus']}",
+            f"- Learning：{weekly_review['learning']}",
+            f"- Next：{weekly_review['looking_forward']}",
+        ])
+
+    if monthly_overview:
+        prompt_lines.extend([
+            "",
+            "## Monthly Context",
+            f"- Position：{monthly_overview['verdict']}",
+            f"- Phase：{monthly_overview['phase']}",
+            f"- Summary：{monthly_overview['verdict_reason']}",
+        ])
+        if monthly_overview.get("progress_pct") is not None:
+            prompt_lines.append(f"- Progress：{format_number(monthly_overview['progress_pct'], 0)}%")
+
+    if latest_activity:
+        prompt_lines.extend([
+            "",
+            "## Latest Activity",
+            f"- Date：{format_short_datetime(latest_activity['activity_start_time'])}",
+            f"- Activity：{latest_activity['activity_name'] or latest_activity['activity_type'] or '活動'}",
+            f"- Distance：{format_number(latest_activity['distance_km'], 2) or '—'} km",
+            f"- Pace：{format_pace_seconds(latest_activity['avg_pace_sec_per_km']) or '—'}",
+            f"- HR：{'' if latest_activity['avg_hr'] is None else int(round(latest_activity['avg_hr']))}",
+            f"- Load：{format_number(latest_activity['training_load'], 1) or '—'}",
+            f"- Workout：{latest_activity['workout_type_name_en'] or '未標註'}",
+            f"- Purpose：{latest_activity['primary_training_purpose_name_en'] or '未標註'}",
+            f"- Shoe：{latest_activity['shoe_display_name'] or '未標註'}",
+        ])
+
+    prompt_lines.extend([
+        "",
+        "## Instructions",
+        "- 先講今天最該先把注意力放在哪裡。",
+        "- 再解釋平台為什麼會先把這個焦點推到前面。",
+        "- 最後建議我應該先去單堂課、週回顧、月回顧或鞋款哪一頁繼續看。",
+        "- 如果你從 Weekly、Monthly 或 Latest Activity context 看見平台尚未明說、但值得注意的補充，可以提出。",
+        "- 但請明確區分：哪些是平台已經判讀的，哪些是你根據 context 額外補充的觀察。",
+        "- 如果不同 context 彼此有張力，請指出張力，不要直接覆蓋平台目前的注意力判斷。",
+    ])
+
+    return "\n".join(prompt_lines)
+
+
+def overview_ai_handoff_panel(attention, weekly_review, monthly_overview, latest_activity):
+    handoff_text = overview_ai_handoff_text(attention, weekly_review, monthly_overview, latest_activity)
+    if not handoff_text:
+        return ""
+
+    return f"""
+      <section class="panel-section" id="overview-ai-handoff">
+        <h2>交給 AI 繼續分析</h2>
+        <div class="review-card ai-handoff-card">
+          <span>AI Share Handoff</span>
+          <strong>把今天的注意力焦點直接交給你習慣的 AI</strong>
+          <p>如果你看完總覽後，想沿著平台已經整理好的注意力、上下文與下一步入口繼續往下聊，這裡就是完整交棒內容。</p>
+          <div class="ai-handoff-block">
+            <div class="ai-handoff-block-head">
+              <div>
+                <strong>完整 handoff</strong>
+                <p class="note">包含今天焦點、Weekly／Monthly 脈絡與最近一堂課。</p>
+              </div>
+              <div class="ai-handoff-actions">
+                <button class="secondary-action" type="button" onclick="copyAiHandoff('overview-ai-handoff-text')">複製給 AI</button>
+              </div>
+            </div>
+            <details class="ai-handoff-preview">
+              <summary>先看會交出去的內容</summary>
+              <textarea id="overview-ai-handoff-text" readonly>{html.escape(handoff_text)}</textarea>
+            </details>
+          </div>
+        </div>
+      </section>
+    """
+
+
 def coach_desk_panel(attention, weekly_review, monthly_overview, monthly_review, story, latest_activity):
     if not attention:
         return ""
@@ -2329,6 +2445,7 @@ def coach_desk_panel(attention, weekly_review, monthly_overview, monthly_review,
         </div>
       </section>
       {overview_reasoning_route_panel(attention, weekly_review, monthly_overview, latest_activity)}
+      {overview_ai_handoff_panel(attention, weekly_review, monthly_overview, latest_activity)}
     """    
 
 
