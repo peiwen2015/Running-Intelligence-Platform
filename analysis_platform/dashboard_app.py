@@ -9,6 +9,7 @@ import re
 import socket
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 import webbrowser
@@ -2155,10 +2156,13 @@ def ensure_rac_running():
     if not RAC_APP_PATH.exists():
         return False
 
+    rac_python = PROJECT_ROOT / ".venv" / "bin" / "python"
+    python_cmd = str(rac_python) if rac_python.exists() else (sys.executable or "python3")
+
     RAC_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with RAC_LOG_PATH.open("ab") as log_file:
         subprocess.Popen(
-            ["python3", str(RAC_APP_PATH)],
+            [python_cmd, str(RAC_APP_PATH)],
             cwd=str(PROJECT_ROOT),
             stdout=log_file,
             stderr=log_file,
