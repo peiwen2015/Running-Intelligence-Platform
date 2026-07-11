@@ -32,16 +32,7 @@ STAMINA_SESSION_START = 205
 STAMINA_SESSION_END_FIELDS = (206, 207)
 
 DEFAULT_DROPDOWN_OPTIONS = {
-    "shoes": [
-    "Boston 13 Green",
-    "Boston 13 Blue",
-    "EVO SL",
-    "Rebel v5",
-    "Nimbus 28",
-    "HOKA Clifton 10",
-    "Boston 12",
-    "Supernova Rise 2",
-    ],
+    "shoes": [],
     "workout_types": [
     "Recovery Run（恢復跑）",
     "Easy Run（輕鬆跑）",
@@ -90,71 +81,7 @@ DEFAULT_DROPDOWN_OPTIONS = {
 }
 WEATHER_FIELDS = ("weather_temp", "humidity", "wind_direction", "wind_speed", "weather_description")
 
-SHOE_DIMENSION_DEFAULTS = {
-    "Boston 13 Green": {
-        "shoe_code": "boston_13_green",
-        "brand": "Adidas",
-        "model": "Boston 13",
-        "nickname": "Green",
-        "category": "Tempo",
-    },
-    "Boston 13 Blue": {
-        "shoe_code": "boston_13_blue",
-        "brand": "Adidas",
-        "model": "Boston 13",
-        "nickname": "Blue",
-        "category": "Tempo",
-    },
-    "EVO SL": {
-        "shoe_code": "evo_sl",
-        "brand": "Adidas",
-        "model": "EVO SL",
-        "nickname": None,
-        "category": "Race",
-    },
-    "Rebel v5": {
-        "shoe_code": "rebel_v5",
-        "brand": "New Balance",
-        "model": "Rebel v5",
-        "nickname": None,
-        "category": "Tempo",
-    },
-    "Nimbus 28": {
-        "shoe_code": "nimbus_28",
-        "brand": "ASICS",
-        "model": "Nimbus 28",
-        "nickname": None,
-        "category": "Recovery",
-    },
-    "HOKA Clifton 10": {
-        "shoe_code": "hoka_clifton_10",
-        "brand": "HOKA",
-        "model": "Clifton 10",
-        "nickname": None,
-        "category": "Daily Trainer",
-    },
-    "Boston 12": {
-        "shoe_code": "boston_12",
-        "brand": "Adidas",
-        "model": "Boston 12",
-        "nickname": None,
-        "category": "Tempo",
-    },
-    "Supernova Rise 2": {
-        "shoe_code": "supernova_rise_2",
-        "brand": "Adidas",
-        "model": "Supernova Rise 2",
-        "nickname": None,
-        "category": "Daily Trainer",
-    },
-    "Supernove Rise 2": {
-        "shoe_code": "supernova_rise_2",
-        "brand": "Adidas",
-        "model": "Supernova Rise 2",
-        "nickname": None,
-        "category": "Daily Trainer",
-    },
-}
+SHOE_DIMENSION_DEFAULTS = {}
 
 WORKOUT_TYPE_DIMENSION_DEFAULTS = {
     "Recovery Run": ("recovery_run", "Recovery Run", "恢復跑", "Recovery", 0, 0, 1, 10, "#7CB7B8"),
@@ -1799,7 +1726,7 @@ def main():
     parser.add_argument("--no-fetch-weather", dest="fetch_weather", action="store_false", help="Skip automatic weather lookup.")
     parser.add_argument("--dropdown-config", type=Path, default=DROPDOWN_CONFIG_PATH, help="JSON file for dropdown options.")
     parser.add_argument("--activity-name", help="Activity name shown in the Activity section.")
-    parser.add_argument("--shoe", help="Shoe name, e.g. 'Boston 13 Green'.")
+    parser.add_argument("--shoe", help="Shoe name, e.g. 'Adidas Boston 13'.")
     parser.add_argument("--weather-temp", type=float, help="Weather temperature in Celsius.")
     parser.add_argument("--humidity", type=float, help="Humidity percentage.")
     parser.add_argument("--wind-direction", help="Wind direction.")
