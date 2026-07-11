@@ -5439,6 +5439,8 @@ def metadata_page_panel(
     scope_counts,
     scope,
     message,
+    page_number,
+    page_size,
 ):
     total = quality_row["total_activities"] if quality_row else 0
     fully_tagged = quality_row["fully_tagged_activities"] if quality_row else 0
@@ -5490,6 +5492,11 @@ def metadata_page_panel(
         "complete": "完整標註",
     }
     current_scope_name = scope_names.get(scope, "僅未標註")
+    total_in_scope = metadata_scope_total(scope_counts, scope)
+    total_pages = max(1, (total_in_scope + page_size - 1) // page_size) if page_size > 0 else 1
+    current_page = min(max(1, page_number), total_pages)
+    current_start = ((current_page - 1) * page_size) + 1 if total_in_scope > 0 else 0
+    current_end = min(current_page * page_size, total_in_scope) if total_in_scope > 0 else 0
 
     helper_text = "先從『缺鞋款』開始補，鞋款分析會最有感。"
     if scope == "missing_workout":
@@ -5501,9 +5508,16 @@ def metadata_page_panel(
     elif scope == "complete":
         helper_text = "這一批已經可直接支援更深的週 / 月 / Journey 判讀。"
 
+    prev_link = ""
+    next_link = ""
+    if current_page > 1:
+        prev_link = "/?" + urlencode({"page": "metadata", "scope": scope, "batch": current_page - 1})
+    if current_page < total_pages:
+        next_link = "/?" + urlencode({"page": "metadata", "scope": scope, "batch": current_page + 1})
+
     table_rows = []
     for row in candidates:
-        edit_link = "/?" + urlencode({"page": "metadata", "edit": row["activity_id"], "scope": scope})
+        edit_link = "/?" + urlencode({"page": "metadata", "edit": row["activity_id"], "scope": scope, "batch": current_page})
         selected_class = " selected-row" if selected_row and row["activity_id"] == selected_row["activity_id"] else ""
         table_rows.append(
             f"""
@@ -5544,6 +5558,7 @@ def metadata_page_panel(
                 <form method="post" action="/metadata/save" class="metadata-form">
                   <input type="hidden" name="activity_id" value="{selected_row["activity_id"]}">
                   <input type="hidden" name="scope" value="{html.escape(scope, quote=True)}">
+                  <input type="hidden" name="batch" value="{current_page}">
                   <label>
                     <span>鞋款</span>
                     {metadata_select("shoe_code", shoe_options, selected_row["shoe_code"] or "", allow_blank=True)}
@@ -5586,6 +5601,19 @@ def metadata_page_panel(
           </section>
         """
 
+    pagination_html = f"""
+        <div class="table-pager">
+          <div class="table-pager-meta">
+            <strong>目前顯示 {current_start}-{current_end}</strong>
+            <span>共 {total_in_scope} 筆 · 第 {current_page}/{total_pages} 批</span>
+          </div>
+          <div class="table-pager-actions">
+            {"<a class=\"pager-link\" href=\"" + html.escape(prev_link, quote=True) + "\">上一批</a>" if prev_link else '<span class="pager-link disabled">上一批</span>'}
+            {"<a class=\"pager-link\" href=\"" + html.escape(next_link, quote=True) + "\">下一批</a>" if next_link else '<span class="pager-link disabled">下一批</span>'}
+          </div>
+        </div>
+    """
+
     return f"""
       {message_html}
       <section class="panel-section">
@@ -5597,7 +5625,7 @@ def metadata_page_panel(
                 <span class="eyebrow">標註補齊工作台</span>
                 <strong>補齊缺少的鞋款、課表與訓練目的</strong>
               </div>
-              <span class="status-badge balanced">目前 {len(candidates)} 筆活動</span>
+              <span class="status-badge balanced">目前顯示 {len(candidates)} / {total_in_scope} 筆</span>
             </div>
             <div class="metric-grid training-kpi-grid">
               {metadata_metric_card("總活動數", total, "所有已匯入活動")}
@@ -5639,6 +5667,7 @@ def metadata_page_panel(
         <p class="note">先選幾筆活動，再把相同標註一次套用。若只想更新其中一項，就把其他欄位留在保留原值。</p>
         <form method="post" action="/metadata/batch">
           <input type="hidden" name="scope" value="{html.escape(scope, quote=True)}">
+          <input type="hidden" name="batch" value="{current_page}">
           <div class="metadata-batch-bar">
             <label>
               <span>鞋款</span>
@@ -5678,6 +5707,7 @@ def metadata_page_panel(
             </table>
           </div>
         </form>
+        {pagination_html}
       </section>
     """
 
@@ -6834,6 +6864,47 @@ def base_styles():
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 12px;
     }
+    .table-pager {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+    .table-pager-meta {
+      display: grid;
+      gap: 2px;
+    }
+    .table-pager-meta strong {
+      font-size: 14px;
+    }
+    .table-pager-meta span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .table-pager-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .pager-link {
+      min-height: 36px;
+      display: inline-flex;
+      align-items: center;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .pager-link.disabled {
+      color: var(--muted);
+      background: #f7fafb;
+      pointer-events: none;
+    }
     .scope-link {
       min-height: 120px;
       display: grid;
@@ -7028,7 +7099,7 @@ def base_styles():
     """
 
 
-def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="unassigned", message="", month="", week=""):
+def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="unassigned", message="", month="", week="", batch="1"):
     if not DB_PATH.exists():
         return f"""<!doctype html>
 <html lang="zh-Hant">
@@ -7088,6 +7159,8 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     metadata_selected = None
     metadata_scope_data = None
     shoes_scope_data = None
+    metadata_page_number = max(1, int(batch)) if str(batch).isdigit() else 1
+    metadata_page_size = 60
     recent = []
     activity_rows = []
     latest_activity = None
@@ -7160,9 +7233,17 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
 
         elif page == "metadata":
             _dropdown_options, metadata_shoes, metadata_workouts, metadata_purposes = metadata_choice_sets(connection)
-            metadata_rows = metadata_candidates(connection, scope=scope, limit=60)
-            training_quality_row = training_assignment_quality(connection)
             metadata_scope_data = metadata_scope_counts(connection)
+            total_in_scope = metadata_scope_total(metadata_scope_data, scope)
+            total_pages = max(1, (total_in_scope + metadata_page_size - 1) // metadata_page_size) if metadata_page_size > 0 else 1
+            metadata_page_number = min(metadata_page_number, total_pages)
+            metadata_rows = metadata_candidates(
+                connection,
+                scope=scope,
+                limit=metadata_page_size,
+                offset=(metadata_page_number - 1) * metadata_page_size,
+            )
+            training_quality_row = training_assignment_quality(connection)
             metadata_selected = metadata_activity(
                 connection,
                 int(edit_activity_id) if str(edit_activity_id).isdigit() else (metadata_rows[0]["activity_id"] if metadata_rows else 0),
@@ -7261,6 +7342,8 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
         metadata_scope_data,
         scope,
         message,
+        metadata_page_number,
+        metadata_page_size,
     )}
     {archive_metric_strip(summary)}
   </main>
@@ -7339,6 +7422,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 (query.get("message") or [""])[0],
                 (query.get("month") or [""])[0],
                 (query.get("week") or [""])[0],
+                (query.get("batch") or ["1"])[0],
             )
         )
 
@@ -7398,6 +7482,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/metadata/save":
             activity_id = int(first_form_value(form, "activity_id", "0") or "0")
             scope = first_form_value(form, "scope", "unassigned")
+            batch = first_form_value(form, "batch", "1")
             shoe_code = first_form_value(form, "shoe_code")
             workout_code = first_form_value(form, "workout_type_code")
             primary_code = first_form_value(form, "primary_purpose_code")
@@ -7419,6 +7504,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "page": "metadata",
                     "edit": activity_id,
                     "scope": scope,
+                    "batch": batch,
                     "message": "標註已儲存",
                 }
             )
@@ -7427,6 +7513,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/metadata/batch":
             scope = first_form_value(form, "scope", "unassigned")
+            batch = first_form_value(form, "batch", "1")
             activity_ids = [int(value) for value in form.get("activity_id", []) if str(value).isdigit()]
             shoe_code = first_form_value(form, "batch_shoe_code", "__KEEP__")
             workout_code = first_form_value(form, "batch_workout_type_code", "__KEEP__")
@@ -7449,6 +7536,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 {
                     "page": "metadata",
                     "scope": scope,
+                    "batch": batch,
                     "message": message,
                 }
             )
