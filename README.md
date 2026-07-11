@@ -119,6 +119,7 @@ analysis_platform/running_analytics.sqlite
 config/dropdown_options.json       下拉選單設定
 assets/                            品牌與介面圖片
 docs/                              架構、知識與產品設計文件
+跑步分析系統 Prompt v1.0.docx       提供給 ChatGPT / LLM 參考的 Excel 分析 prompt 範例
 ```
 
 ---
@@ -168,3 +169,11 @@ docs/      架構與產品文件
 對外 announcement 草稿可參考：
 
 [`LAUNCH_ANNOUNCEMENT.md`](/Users/perryliu/Documents/Running%20Analytics/LAUNCH_ANNOUNCEMENT.md)
+
+---
+
+## Prompt Reference
+
+[`跑步分析系統 Prompt v1.0.docx`](/Users/perryliu/Documents/Running%20Analytics/%E8%B7%91%E6%AD%A5%E5%88%86%E6%9E%90%E7%B3%BB%E7%B5%B1%20Prompt%20v1.0.docx) 是公開提供的 prompt reference。
+
+它示範的是：當跑步資料已先整理成固定格式 Excel 後，如何把這份資料交給 ChatGPT 或其他 LLM，產生一致的訓練分析文字。
