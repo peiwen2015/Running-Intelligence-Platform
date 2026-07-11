@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 import webbrowser
-from datetime import date
+from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -1176,6 +1176,22 @@ def selected_month_summary(connection, month_key=None):
     return connection.execute("SELECT * FROM current_month_summary_view").fetchone()
 
 
+def month_window(month_key):
+    if not month_key:
+        return None, None
+    try:
+        year, month = [int(part) for part in str(month_key).split("-", 1)]
+        start = date(year, month, 1)
+    except (TypeError, ValueError):
+        return None, None
+    if month == 12:
+        next_month = date(year + 1, 1, 1)
+    else:
+        next_month = date(year, month + 1, 1)
+    end = next_month - timedelta(days=1)
+    return start.isoformat(), end.isoformat()
+
+
 def monthly_history(connection):
     return connection.execute(
         """
@@ -1379,6 +1395,60 @@ def selected_month_intelligence(connection, month_key=None):
         "is_partial_month": partial,
         "coach_summary": coach_summary,
     }
+
+
+def selected_month_related_weeks(connection, month_key=None, limit=5):
+    target_month = selected_month_summary(connection, month_key)
+    if not target_month:
+        return []
+    start_date, end_date = month_window(target_month["month_key"])
+    if not start_date or not end_date:
+        return []
+
+    rows = connection.execute(
+        """
+        SELECT
+            week_offset,
+            start_date,
+            end_date,
+            activities,
+            total_km,
+            training_load
+        FROM weekly_summary_view
+        WHERE start_date <= ?
+          AND end_date >= ?
+        ORDER BY start_date
+        LIMIT ?
+        """,
+        (end_date, start_date, limit),
+    ).fetchall()
+
+    result = []
+    for row in rows:
+        intelligence = selected_week_intelligence(connection, row["week_offset"])
+        load_delta = intelligence["load_delta"] if intelligence else None
+        if load_delta is None:
+            note = "這週還在建立自己的基準。"
+        elif load_delta > 15:
+            note = "這週把刺激往上推，是這個月的重要建構來源。"
+        elif load_delta < -15:
+            note = "這週把刺激收回來，幫這個月留下吸收空間。"
+        else:
+            note = "這週主要在把節奏穩穩接住。"
+        verdict = weekly_review_payload(row, intelligence)["verdict"] if intelligence else "本週"
+        result.append(
+            {
+                "week_offset": row["week_offset"],
+                "start_date": row["start_date"],
+                "end_date": row["end_date"],
+                "activities": row["activities"],
+                "total_km": row["total_km"],
+                "training_load": row["training_load"],
+                "verdict": verdict,
+                "note": note,
+            }
+        )
+    return result
 
 
 def monthly_distribution(connection, limit=8):
@@ -3329,6 +3399,9 @@ def monthly_driver_card(intelligence, progress_row):
           {driver_row("長跑主線", long_level, long_note)}
         </div>
         <p>{html.escape(summary)}</p>
+        <div class="reasoning-jump-row">
+          <a class="inline-jump-link" href="#monthly-weeks">去看關鍵週</a>
+        </div>
       </div>
     """
 
@@ -3457,6 +3530,9 @@ def monthly_load_state_card(rows, selected_month, verdict):
           {"".join(items)}
         </div>
         <p>{html.escape(insight)}</p>
+        <div class="reasoning-jump-row">
+          <a class="inline-jump-link" href="#monthly-weeks">再看這個月是由哪幾週撐起來的</a>
+        </div>
       </div>
     """
 
@@ -3511,6 +3587,48 @@ def monthly_structure_card(distribution_rows):
           {"".join(items)}
         </div>
         <p>{html.escape(insight)}</p>
+        <div class="reasoning-jump-row">
+          <a class="inline-jump-link" href="#monthly-key-activities">再看關鍵課</a>
+        </div>
+      </div>
+    """
+
+
+def monthly_related_weeks_table(rows):
+    if not rows:
+        return '<p class="note">這個月目前還沒有足夠的週資料可以串起來。</p>'
+    body = []
+    for row in rows:
+        href = "/?" + urlencode({"page": "weekly", "week": row["week_offset"]})
+        body.append(
+            f"""
+            <tr>
+              <td>{html.escape(week_label_from_offset(row["week_offset"]))}</td>
+              <td>{html.escape(str(row["start_date"]))} – {html.escape(str(row["end_date"]))}</td>
+              <td>{html.escape(str(row["verdict"]))}</td>
+              <td>{format_number(row["total_km"], 1)}</td>
+              <td>{format_number(row["training_load"], 0)}</td>
+              <td>{html.escape(str(row["note"]))}</td>
+              <td><a class="inline-jump-link" href="{html.escape(href, quote=True)}">看這一週</a></td>
+            </tr>
+            """
+        )
+    return f"""
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>週次</th>
+              <th>日期</th>
+              <th>本週判讀</th>
+              <th>KM</th>
+              <th>負荷</th>
+              <th>這週留下了什麼</th>
+              <th>往下看</th>
+            </tr>
+          </thead>
+          <tbody>{"".join(body)}</tbody>
+        </table>
       </div>
     """
 
@@ -4225,7 +4343,7 @@ def journey_page_panel(story, timeline_rows, turning_point_rows, available_month
     """
 
 
-def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality_row, history_rows, distribution_rows, key_session_rows, available_month_rows, selected_month, coach_memory=None):
+def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality_row, history_rows, distribution_rows, key_session_rows, related_week_rows, available_month_rows, selected_month, coach_memory=None):
     if not monthly or not intelligence:
         return """
         <section class="panel-section">
@@ -4297,6 +4415,12 @@ def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality
         monthly_driver_card(intelligence, progress_row),
         monthly_structure_card(distribution_rows),
     ]
+    reasoning_steps = [
+        ("先看位置", "#monthly-position"),
+        ("再看形成原因", "#monthly-understanding"),
+        ("再看關鍵週", "#monthly-weeks"),
+        ("最後回到關鍵課", "#monthly-key-activities"),
+    ]
 
     return f"""
       {monthly_selector_bar(available_month_rows, selected_month)}
@@ -4312,11 +4436,14 @@ def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality
               </div>
               <span class="status-badge {"baseline" if intelligence["is_partial_month"] else "balanced"}">{html.escape(confidence)}</span>
             </div>
-            <div class="review-card">
+            <div class="review-card" id="monthly-position">
               <span>本月判讀</span>
               <strong>{html.escape(verdict)}</strong>
               <p>{html.escape(letter["opening"])}</p>
               <p class="note">月份狀態：{html.escape(month_state)} · 信心：{html.escape(confidence)} · {html.escape(confidence_reason)}</p>
+              <div class="reasoning-jump-row">
+                {"".join(f'<a class="inline-jump-link" href="{html.escape(href, quote=True)}">{html.escape(label)}</a>' for label, href in reasoning_steps)}
+              </div>
             </div>
             <div class="coach-summary review-summary">
               <span>判讀依據</span>
@@ -4344,14 +4471,19 @@ def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality
           </div>
         </div>
       </section>
-      <section class="panel-section">
+      <section class="panel-section" id="monthly-understanding">
         <h2>教練怎麼理解這個月</h2>
         <p class="note">{html.escape(letter["evidence_intro"])}</p>
         <div class="metric-grid training-kpi-grid briefing-evidence-grid">
           {"".join(evidence_cards)}
         </div>
       </section>
-      <section class="panel-section">
+      <section class="panel-section" id="monthly-weeks">
+        <h2>教練沿著哪些週確認這個月</h2>
+        <p class="note">月份判讀不是直接跳到單堂課，而是先看哪幾週一起把這個月推到現在的位置。</p>
+        {monthly_related_weeks_table(related_week_rows)}
+      </section>
+      <section class="panel-section" id="monthly-key-activities">
         <h2>教練看了哪些關鍵課</h2>
         {monthly_key_sessions_table(key_session_rows)}
       </section>
@@ -6796,6 +6928,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     monthly_distribution_rows = []
     monthly_progress_row = None
     monthly_key_session_rows = []
+    monthly_related_week_rows = []
     monthly_assignment_quality_row = None
     journey_selected_story = None
     journey_timeline_rows = []
@@ -6867,6 +7000,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
             monthly_distribution_rows = selected_month_distribution(connection, selected_month or None, limit=8)
             monthly_progress_row = selected_month_progress(connection, selected_month or None)
             monthly_key_session_rows = selected_month_key_sessions(connection, selected_month or None)
+            monthly_related_week_rows = selected_month_related_weeks(connection, selected_month or None, limit=5)
             monthly_assignment_quality_row = selected_month_assignment_quality(connection, selected_month or None)
 
         elif page == "shoes":
@@ -6951,7 +7085,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
 
     if page == "monthly":
         return f"""{html_start}
-    {monthly_review_panel(monthly, monthly_review, monthly_progress_row, monthly_assignment_quality_row, monthly_rows, monthly_distribution_rows, monthly_key_session_rows, month_rows, selected_month, monthly_memory)}
+    {monthly_review_panel(monthly, monthly_review, monthly_progress_row, monthly_assignment_quality_row, monthly_rows, monthly_distribution_rows, monthly_key_session_rows, monthly_related_week_rows, month_rows, selected_month, monthly_memory)}
   </main>
 </body>
 </html>"""
