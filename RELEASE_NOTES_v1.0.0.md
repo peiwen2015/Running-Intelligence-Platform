@@ -2,12 +2,7 @@
 
 Running Intelligence Platform 的第一個正式版本。
 
-這次發布把跑步資料、產品語意和對外入口收斂成一條穩定的本機產品鏈路。
-
-## Summary
-
-`v1.0.0` 是 Running Intelligence Platform 的正式起點。
-它不是單純的資料工具，而是一個以跑者與教練視角設計的本機產品。
+`v1.0.0` 是正式起點，這次把資料匯入、產品語意和對外入口收斂成一條穩定的本機產品鏈路。
 
 ## Highlights
 
@@ -34,12 +29,5 @@ Running Intelligence Platform 的第一個正式版本。
 - 這個月目前位於哪個訓練位置？
 - 今天最該關心的是什麼？
 
-## Notes
-
-- 這是本機優先、knowledge-first 的跑步分析產品
-- 設計理念是先治理資料，再讓頁面長出來
-- `v1.0.0` 是產品對外的正式起點
-
-## For GitHub Release
-
-You can paste this release note directly into GitHub Release.
+這是本機優先、knowledge-first 的跑步分析產品。
+設計理念是先治理資料，再讓頁面長出來。
