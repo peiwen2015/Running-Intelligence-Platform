@@ -8933,6 +8933,10 @@ def base_styles():
     .ai-reply-rendered ul {
       margin: 0;
     }
+    .ai-reply-rendered strong {
+      font-size: inherit;
+      line-height: inherit;
+    }
     .ai-reply-rendered ul {
       padding-left: 20px;
     }
