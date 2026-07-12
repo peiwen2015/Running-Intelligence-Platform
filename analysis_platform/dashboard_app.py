@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 import webbrowser
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -34,6 +34,8 @@ PROJECT_ROOT = ROOT.parent
 DEFAULT_DB_PATH = ROOT / "running_analytics.sqlite"
 ASSETS_DIR = PROJECT_ROOT / "assets"
 CONFIG_PATH = PROJECT_ROOT / "config" / "dropdown_options.json"
+AI_REPLY_STORE_PATH = PROJECT_ROOT / "config" / "local_ai_replies.json"
+AI_REPLIES_DIR = PROJECT_ROOT / "AI_REPLIES"
 RAC_APP_PATH = PROJECT_ROOT / "app.py"
 RAC_HOST = "127.0.0.1"
 RAC_PORT = 8765
@@ -147,6 +149,240 @@ def format_duration_hms(seconds):
     hours, remainder = divmod(total, 3600)
     minutes, secs = divmod(remainder, 60)
     return f"{hours}:{minutes:02d}:{secs:02d}"
+
+
+def load_ai_reply_store():
+    try:
+        return json.loads(AI_REPLY_STORE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_ai_reply_store(payload):
+    AI_REPLY_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    AI_REPLY_STORE_PATH.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def extract_ai_reply_markdown(text):
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+
+    tagged_patterns = [
+        r"```running-intelligence-reply\s*\n(.*?)```",
+        r"```markdown\s*\n(.*?)```",
+        r"```md\s*\n(.*?)```",
+    ]
+    for pattern in tagged_patterns:
+        matches = re.findall(pattern, raw, flags=re.IGNORECASE | re.DOTALL)
+        if matches:
+            return matches[-1].strip()
+
+    generic_blocks = re.findall(r"```[a-zA-Z0-9_-]*\s*\n(.*?)```", raw, flags=re.DOTALL)
+    if generic_blocks:
+        return generic_blocks[-1].strip()
+    return raw
+
+
+def detect_ai_reply_parse_mode(text):
+    raw = (text or "").strip()
+    if not raw:
+        return "empty"
+    tagged_patterns = [
+        r"```running-intelligence-reply\s*\n(.*?)```",
+        r"```markdown\s*\n(.*?)```",
+        r"```md\s*\n(.*?)```",
+    ]
+    for index, pattern in enumerate(tagged_patterns):
+        matches = re.findall(pattern, raw, flags=re.IGNORECASE | re.DOTALL)
+        if matches:
+            return "tagged" if index == 0 else "markdown"
+    generic_blocks = re.findall(r"```[a-zA-Z0-9_-]*\s*\n(.*?)```", raw, flags=re.DOTALL)
+    if generic_blocks:
+        return "generic"
+    return "raw"
+
+
+def markdown_inline(text):
+    escaped = html.escape(text)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"`(.+?)`", r"<code>\1</code>", escaped)
+    return escaped
+
+
+def render_simple_markdown(markdown_text):
+    text = (markdown_text or "").strip()
+    if not text:
+        return ""
+
+    blocks = []
+    list_items = []
+
+    def flush_list():
+        nonlocal list_items
+        if list_items:
+            blocks.append("<ul>" + "".join(f"<li>{item}</li>" for item in list_items) + "</ul>")
+            list_items = []
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            flush_list()
+            continue
+        if stripped.startswith("### "):
+            flush_list()
+            blocks.append(f"<h5>{markdown_inline(stripped[4:])}</h5>")
+        elif stripped.startswith("## "):
+            flush_list()
+            blocks.append(f"<h4>{markdown_inline(stripped[3:])}</h4>")
+        elif stripped.startswith("# "):
+            flush_list()
+            blocks.append(f"<h3>{markdown_inline(stripped[2:])}</h3>")
+        elif stripped.startswith("- "):
+            list_items.append(markdown_inline(stripped[2:]))
+        else:
+            flush_list()
+            blocks.append(f"<p>{markdown_inline(stripped)}</p>")
+    flush_list()
+    return "".join(blocks)
+
+
+def build_ai_reply_key(surface, identifier):
+    return f"{surface}:{identifier}"
+
+
+def slugify_ai_reply_part(value):
+    text = str(value or "").strip()
+    if not text:
+        return "unknown"
+    text = text.replace(":", "__")
+    text = re.sub(r"[^A-Za-z0-9._-]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_.")
+    return text or "unknown"
+
+
+def ai_reply_scope_dir(surface):
+    return AI_REPLIES_DIR / slugify_ai_reply_part(surface)
+
+
+def ai_reply_file_stem(surface, identifier):
+    return f"{slugify_ai_reply_part(surface)}__{slugify_ai_reply_part(identifier)}"
+
+
+def ai_reply_paths(surface, identifier):
+    folder = ai_reply_scope_dir(surface)
+    stem = ai_reply_file_stem(surface, identifier)
+    return folder / f"{stem}.json", folder / f"{stem}.md"
+
+
+def normalize_ai_reply_record(record):
+    if not isinstance(record, dict):
+        return None
+    markdown = record.get("responseMarkdown")
+    if markdown is None:
+        markdown = record.get("markdown", "")
+    created_at = record.get("createdAt") or record.get("saved_at") or ""
+    updated_at = record.get("updatedAt") or record.get("saved_at") or created_at
+    return {
+        "analysisNodeId": record.get("analysisNodeId") or record.get("identifier") or "",
+        "scope": record.get("scope") or record.get("surface") or "",
+        "provider": record.get("provider") or "external-ai",
+        "model": record.get("model"),
+        "promptVersion": record.get("promptVersion") or "handoff-v1.1",
+        "responseMarkdown": markdown or "",
+        "markdown": markdown or "",
+        "createdAt": created_at,
+        "updatedAt": updated_at,
+        "title": record.get("title") or "AI 回覆",
+    }
+
+
+def load_ai_reply_from_files(surface, identifier):
+    meta_path, markdown_path = ai_reply_paths(surface, identifier)
+    if not meta_path.exists():
+        return None
+    try:
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    markdown = ""
+    if markdown_path.exists():
+        try:
+            markdown = markdown_path.read_text(encoding="utf-8")
+        except OSError:
+            markdown = ""
+    if markdown:
+        metadata["responseMarkdown"] = markdown
+        metadata["markdown"] = markdown
+    return normalize_ai_reply_record(metadata)
+
+
+def get_ai_reply(surface, identifier):
+    file_record = load_ai_reply_from_files(surface, identifier)
+    if file_record:
+        return file_record
+    store = load_ai_reply_store()
+    return normalize_ai_reply_record(store.get(build_ai_reply_key(surface, identifier)))
+
+
+def save_ai_reply(surface, identifier, title, raw_text):
+    markdown = extract_ai_reply_markdown(raw_text)
+    existing = get_ai_reply(surface, identifier) or {}
+    now = datetime.now().isoformat(timespec="seconds")
+    record = {
+        "analysisNodeId": identifier,
+        "scope": surface,
+        "provider": "external-ai",
+        "model": None,
+        "promptVersion": "handoff-v1.1",
+        "createdAt": existing.get("createdAt") or now,
+        "updatedAt": now,
+        "title": title,
+    }
+    meta_path, markdown_path = ai_reply_paths(surface, identifier)
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    markdown_path.write_text(markdown.strip() + "\n", encoding="utf-8")
+    record["markdownFile"] = markdown_path.name
+    meta_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return markdown
+
+
+def ai_handoff_response_format_instructions():
+    return [
+        "## Response Format",
+        "- 你的回覆必須包含兩個連續部分。",
+        "- 第一部分：直接用一般 markdown 正常回答，不要加入「第一部分」、「閱讀版」或其他格式說明。",
+        "- 第二部分：在閱讀內容結束後，再輸出一份完全相同、可貼回平台保存的 markdown。",
+        "- 第二部分必須放進單一 fenced code block，並優先使用 ```running-intelligence-reply；若不方便，至少使用 ```markdown。",
+        "- code block 內只能包含最終回答內容，不得加入前言、操作說明、JSON、HTML、資料來源說明或額外註解，也不得在框內再次建立 fenced code block。",
+        "- 請固定使用以下結構：",
+        "- `# 整體判讀`",
+        "- `## 平台判讀依據`",
+        "- `## AI 額外觀察`",
+        "- `## 判讀衝突`",
+        "- `## 下一步提醒`",
+        "- 若沒有額外觀察，請寫「沒有需要額外補充的明顯訊號」。",
+        "- 若沒有衝突，請寫「未發現 raw data 與平台判讀之間有明顯衝突」。",
+        "- 下一步提醒只能提供一個。",
+    ]
+
+
+def append_previous_ai_response(prompt_lines, existing_reply):
+    if not existing_reply or not existing_reply.get("responseMarkdown"):
+        return
+    prompt_lines.extend(
+        [
+            "",
+            "## Previous AI Response",
+            "以下內容是使用者先前保存的 AI 延伸分析。",
+            "它只能作為討論脈絡，不是平台治理事實，也不能用來覆蓋 Activity Facts、Coach Understanding、Reasoning、Attention Segments、Context 或 Evidence。",
+            "如果舊回覆中的內容無法由本次平台資料支持，請把它視為先前推測，不要延續為既定事實。",
+            existing_reply["responseMarkdown"],
+        ]
+    )
 
 
 def format_activity_time(value):
@@ -1005,7 +1241,7 @@ def weekly_review_payload(weekly, intelligence):
             ("先看學習", "#weekly-learning"),
             ("再看形成原因", "#weekly-cause"),
             ("再看關鍵課", "#weekly-key-activities"),
-            ("交給 AI 繼續分析", "#weekly-ai-handoff"),
+            ("AI 延伸分析", "#weekly-ai-handoff"),
         ],
     }
 
@@ -1211,7 +1447,7 @@ def activity_review_payload(activity, split_rows):
             ("再看形成原因", "#activity-cause"),
             ("再看關鍵片段", "#activity-segments"),
             ("最後回到證據", "#activity-evidence"),
-            ("交給 AI 繼續分析", "#activity-ai-handoff"),
+            ("AI 延伸分析", "#activity-ai-handoff"),
         ],
     }
 
@@ -2205,6 +2441,83 @@ def overview_attention_payload(connection):
     }
 
 
+def ai_reply_saved_panel(title, existing_reply=None):
+    if not existing_reply:
+        return ""
+    raw_markdown = existing_reply.get("responseMarkdown", "")
+    rendered = render_simple_markdown(raw_markdown)
+    saved_at = existing_reply.get("updatedAt", "")
+    saved_note = f"儲存於 {saved_at.replace('T', ' ')}" if saved_at else "已儲存"
+    if not rendered:
+        return ""
+    return f"""
+      <section class="panel-section">
+        <h2>上次 AI 延伸分析</h2>
+        <div class="review-card ai-reply-preview">
+          <span>{html.escape(saved_note)}</span>
+          <strong>{html.escape(title)}</strong>
+          <div class="ai-reply-rendered">{rendered}</div>
+          <details class="ai-reply-raw">
+            <summary>看原始 markdown</summary>
+            <textarea readonly>{html.escape(raw_markdown)}</textarea>
+          </details>
+        </div>
+      </section>
+    """
+
+
+def ai_reply_capture_panel(surface, identifier, title, return_page, existing_reply=None, activity_id="", week="", month=""):
+    rendered = ""
+    raw_markdown = ""
+    saved_note = "還沒有貼回過 AI 回覆。"
+    if existing_reply:
+        raw_markdown = existing_reply.get("responseMarkdown", "")
+        rendered = render_simple_markdown(raw_markdown)
+        saved_at = existing_reply.get("updatedAt", "")
+        saved_note = f"上次儲存：{saved_at.replace('T', ' ')}" if saved_at else "已儲存 AI 回覆"
+    action_title = "貼回新的 AI 回覆" if existing_reply else "貼回 AI 回覆"
+    lead = (
+        "把更新後的 AI 回覆貼在這裡。你可以直接貼上整段內容，不必手動刪除前面的閱讀版。平台會依序尋找：最後一個 "
+        "<code>running-intelligence-reply</code> 區塊、最後一個 markdown 區塊，若都沒有，才會使用完整貼上內容。"
+        if existing_reply
+        else "把你和 AI 繼續分析後的完整回覆貼在這裡。你可以直接貼上整段內容，不必手動刪除前面的閱讀版。平台會依序尋找：最後一個 "
+        "<code>running-intelligence-reply</code> 區塊、最後一個 markdown 區塊，若都沒有，才會使用完整貼上內容。"
+    )
+
+    return f"""
+      <section class="panel-section">
+        <h2>{action_title}</h2>
+        <div class="review-card ai-handoff-card">
+          <span>AI Conversation Loop</span>
+          <strong>把你跟 AI 往下聊出的結果存回這一頁</strong>
+          <p>{lead}</p>
+          <form method="post" action="/ai-replies/save" class="ai-reply-form">
+            <input type="hidden" name="surface" value="{html.escape(surface, quote=True)}">
+            <input type="hidden" name="identifier" value="{html.escape(identifier, quote=True)}">
+            <input type="hidden" name="title" value="{html.escape(title, quote=True)}">
+            <input type="hidden" name="page" value="{html.escape(return_page, quote=True)}">
+            <input type="hidden" name="activity_id" value="{html.escape(str(activity_id), quote=True)}">
+            <input type="hidden" name="week" value="{html.escape(str(week), quote=True)}">
+            <input type="hidden" name="month" value="{html.escape(str(month), quote=True)}">
+            <label class="inline-field">
+              <span>貼上 AI 回覆</span>
+              <textarea name="ai_reply_raw" data-ai-reply-input="1" placeholder="把 AI 回覆整段貼進來。平台會先解析出實際要保存的內容。">{html.escape(raw_markdown)}</textarea>
+            </label>
+            <div class="ai-reply-parse-state" data-ai-reply-state>尚未貼上 AI 回覆</div>
+            <div class="ai-reply-parsed-preview" data-ai-reply-preview hidden>
+              <span>即將保存的內容</span>
+              <textarea readonly data-ai-reply-preview-text></textarea>
+            </div>
+            <div class="ai-handoff-actions">
+              <button class="primary-action" type="submit">儲存 AI 回覆</button>
+            </div>
+          </form>
+          <p class="note">{html.escape(saved_note)}</p>
+        </div>
+      </section>
+    """
+
+
 def overview_reasoning_route_panel(attention, weekly_review, monthly_overview, latest_activity):
     if not attention:
         return ""
@@ -2322,7 +2635,7 @@ def coach_desk_focus_route(today, weekly_review, monthly_overview, story, latest
     }
 
 
-def overview_ai_handoff_text(attention, weekly_review, monthly_overview, latest_activity):
+def overview_ai_handoff_text(attention, weekly_review, monthly_overview, latest_activity, saved_reply=None):
     if not attention:
         return ""
 
@@ -2398,6 +2711,8 @@ def overview_ai_handoff_text(attention, weekly_review, monthly_overview, latest_
             f"- Shoe：{safe_text(latest_activity['shoe_display_name'] or '未標註')}",
         ])
 
+    append_previous_ai_response(prompt_lines, saved_reply)
+
     prompt_lines.extend([
         "",
         "## Instructions",
@@ -2408,18 +2723,23 @@ def overview_ai_handoff_text(attention, weekly_review, monthly_overview, latest_
         "- 但請明確區分：哪些是平台已經判讀的，哪些是你根據 context 額外補充的觀察。",
         "- 如果不同 context 彼此有張力，請指出張力，不要直接覆蓋平台目前的注意力判斷。",
     ])
+    prompt_lines.extend([""] + ai_handoff_response_format_instructions())
 
     return "\n".join(prompt_lines)
 
 
-def overview_ai_handoff_panel(attention, weekly_review, monthly_overview, latest_activity):
-    handoff_text = overview_ai_handoff_text(attention, weekly_review, monthly_overview, latest_activity)
+def overview_ai_handoff_panel(attention, weekly_review, monthly_overview, latest_activity, saved_reply=None):
+    handoff_text = overview_ai_handoff_text(attention, weekly_review, monthly_overview, latest_activity, saved_reply)
     if not handoff_text:
         return ""
 
+    saved_panel = ai_reply_saved_panel("今天的總覽 AI 回覆", saved_reply)
+    capture_panel = ai_reply_capture_panel("overview", date.today().isoformat(), "今天的總覽 AI 回覆", "home", saved_reply)
+
     return f"""
+      {saved_panel}
       <section class="panel-section" id="overview-ai-handoff">
-        <h2>交給 AI 繼續分析</h2>
+        <h2>AI 延伸分析</h2>
         <div class="review-card ai-handoff-card">
           <span>AI Share Handoff</span>
           <strong>把今天的注意力焦點直接交給你習慣的 AI</strong>
@@ -2442,10 +2762,11 @@ def overview_ai_handoff_panel(attention, weekly_review, monthly_overview, latest
           <p class="note" id="overview-ai-handoff-status">先看完總覽，再複製交給你習慣的 AI 繼續分析。</p>
         </div>
       </section>
+      {capture_panel}
     """
 
 
-def coach_desk_panel(attention, weekly_review, monthly_overview, monthly_review, story, latest_activity):
+def coach_desk_panel(attention, weekly_review, monthly_overview, monthly_review, story, latest_activity, saved_reply=None):
     if not attention:
         return ""
 
@@ -2519,7 +2840,7 @@ def coach_desk_panel(attention, weekly_review, monthly_overview, monthly_review,
         </div>
       </section>
       {overview_reasoning_route_panel(attention, weekly_review, monthly_overview, latest_activity)}
-      {overview_ai_handoff_panel(attention, weekly_review, monthly_overview, latest_activity)}
+      {overview_ai_handoff_panel(attention, weekly_review, monthly_overview, latest_activity, saved_reply)}
     """    
 
 
@@ -4178,6 +4499,7 @@ def weekly_ai_handoff_text(
     monthly_overview=None,
     overview_attention=None,
     include_raw_data=False,
+    saved_reply=None,
 ):
     if not weekly or not intelligence or not review:
         return ""
@@ -4356,6 +4678,8 @@ def weekly_ai_handoff_text(
                     )
                 )
 
+    append_previous_ai_response(prompt_lines, saved_reply)
+
     prompt_lines.extend([
         "",
         "## Instructions",
@@ -4368,6 +4692,7 @@ def weekly_ai_handoff_text(
         "- 但請明確區分：哪些是平台已經判讀的，哪些是你根據 evidence 額外補充的觀察。",
         "- 如果 evidence 與平台判讀有衝突，請優先指出衝突，不要直接覆蓋平台判讀。",
     ])
+    prompt_lines.extend([""] + ai_handoff_response_format_instructions())
 
     return "\n".join(prompt_lines)
 
@@ -4382,6 +4707,7 @@ def weekly_ai_handoff_panel(
     history_rows_with_labels=None,
     monthly_overview=None,
     overview_attention=None,
+    saved_reply=None,
 ):
     handoff_text = weekly_ai_handoff_text(
         weekly,
@@ -4394,13 +4720,19 @@ def weekly_ai_handoff_panel(
         monthly_overview,
         overview_attention,
         include_raw_data=True,
+        saved_reply=saved_reply,
     )
     if not handoff_text:
         return ""
 
+    title = f"{weekly['start_date']} – {weekly['end_date']} 週回顧 AI 回覆"
+    saved_panel = ai_reply_saved_panel(title, saved_reply)
+    capture_panel = ai_reply_capture_panel("weekly", f"{weekly['start_date']}:{weekly['end_date']}", title, "weekly", saved_reply, week=str(weekly['week_offset']))
+
     return f"""
+      {saved_panel}
       <section class="panel-section" id="weekly-ai-handoff">
-        <h2>交給 AI 繼續分析</h2>
+        <h2>AI 延伸分析</h2>
         <div class="review-card ai-handoff-card">
           <span>AI Share Handoff</span>
           <strong>把這週的教練學習脈絡直接交給你習慣的 AI</strong>
@@ -4423,10 +4755,11 @@ def weekly_ai_handoff_panel(
           <p class="note" id="weekly-ai-handoff-status">先看完這週，再複製交給你習慣的 AI 繼續分析。</p>
         </div>
       </section>
+      {capture_panel}
     """
 
 
-def monthly_ai_handoff_text(monthly, intelligence, progress_row, distribution_rows, key_session_rows, related_week_rows, coach_memory=None, include_raw_data=False):
+def monthly_ai_handoff_text(monthly, intelligence, progress_row, distribution_rows, key_session_rows, related_week_rows, coach_memory=None, include_raw_data=False, saved_reply=None):
     if not monthly or not intelligence:
         return ""
 
@@ -4635,6 +4968,8 @@ def monthly_ai_handoff_text(monthly, intelligence, progress_row, distribution_ro
                 )
             )
 
+    append_previous_ai_response(prompt_lines, saved_reply)
+
     prompt_lines.extend([
         "",
         "## Instructions",
@@ -4647,11 +4982,12 @@ def monthly_ai_handoff_text(monthly, intelligence, progress_row, distribution_ro
         "- 但請明確區分：哪些是平台已經判讀的，哪些是你根據 evidence 額外補充的觀察。",
         "- 如果 evidence 與平台判讀有衝突，請優先指出衝突，不要直接覆蓋平台判讀。",
     ])
+    prompt_lines.extend([""] + ai_handoff_response_format_instructions())
 
     return "\n".join(prompt_lines)
 
 
-def monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_rows, key_session_rows, related_week_rows, coach_memory=None):
+def monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_rows, key_session_rows, related_week_rows, coach_memory=None, saved_reply=None):
     handoff_text = monthly_ai_handoff_text(
         monthly,
         intelligence,
@@ -4661,13 +4997,19 @@ def monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_r
         related_week_rows,
         coach_memory,
         include_raw_data=True,
+        saved_reply=saved_reply,
     )
     if not handoff_text:
         return ""
 
+    title = f'{monthly["month_key"]} 月回顧 AI 回覆'
+    saved_panel = ai_reply_saved_panel(title, saved_reply)
+    capture_panel = ai_reply_capture_panel("monthly", str(monthly["month_key"]), title, "monthly", saved_reply, month=str(monthly["month_key"]))
+
     return f"""
+      {saved_panel}
       <section class="panel-section" id="monthly-ai-handoff">
-        <h2>交給 AI 繼續分析</h2>
+        <h2>AI 延伸分析</h2>
         <div class="review-card ai-handoff-card">
           <span>AI Share Handoff</span>
           <strong>把這個月的教練位置判讀直接交給你習慣的 AI</strong>
@@ -4690,6 +5032,7 @@ def monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_r
           <p class="note" id="monthly-ai-handoff-status">先看完這個月，再複製交給你習慣的 AI 繼續分析。</p>
         </div>
       </section>
+      {capture_panel}
     """
 
 
@@ -4924,7 +5267,7 @@ def activity_split_table(split_rows):
     """
 
 
-def activity_ai_handoff_text(activity, review, split_rows, weekly_review=None, monthly_overview=None, include_raw_data=False):
+def activity_ai_handoff_text(activity, review, split_rows, weekly_review=None, monthly_overview=None, include_raw_data=False, saved_reply=None):
     if not activity or not review:
         return ""
 
@@ -5086,6 +5429,8 @@ def activity_ai_handoff_text(activity, review, split_rows, weekly_review=None, m
                 )
             )
 
+    append_previous_ai_response(prompt_lines, saved_reply)
+
     prompt_lines.extend([
         "",
         "## Instructions",
@@ -5096,11 +5441,12 @@ def activity_ai_handoff_text(activity, review, split_rows, weekly_review=None, m
         "- 但請明確區分：哪些是平台已經判讀的，哪些是你根據 raw data 額外補充的觀察。",
         "- 如果 raw data 與平台判讀有衝突，請優先指出衝突，不要直接覆蓋平台判讀。",
     ])
+    prompt_lines.extend([""] + ai_handoff_response_format_instructions())
 
     return "\n".join(prompt_lines)
 
 
-def activity_ai_handoff_panel(activity, review, split_rows, weekly_review=None, monthly_overview=None):
+def activity_ai_handoff_panel(activity, review, split_rows, weekly_review=None, monthly_overview=None, saved_reply=None):
     handoff_text = activity_ai_handoff_text(
         activity,
         review,
@@ -5108,15 +5454,20 @@ def activity_ai_handoff_panel(activity, review, split_rows, weekly_review=None, 
         weekly_review,
         monthly_overview,
         include_raw_data=True,
+        saved_reply=saved_reply,
     )
     if not handoff_text:
         return ""
 
     escaped_text = html.escape(handoff_text)
+    title = f'{format_short_datetime(activity["activity_start_time"])} 單堂課 AI 回覆'
+    saved_panel = ai_reply_saved_panel(title, saved_reply)
+    capture_panel = ai_reply_capture_panel("activity", str(activity["activity_id"]), title, "activity", saved_reply, activity_id=str(activity["activity_id"]))
 
     return f"""
+      {saved_panel}
       <section class="panel-section" id="activity-ai-handoff">
-        <h2>交給 AI 繼續分析</h2>
+        <h2>AI 延伸分析</h2>
         <div class="review-card ai-handoff-card">
           <span>AI Share Handoff</span>
           <strong>把這堂課的教練脈絡直接交給你習慣的 AI</strong>
@@ -5139,10 +5490,11 @@ def activity_ai_handoff_panel(activity, review, split_rows, weekly_review=None, 
           <p class="note" id="activity-ai-handoff-status">先看完這堂課，再複製交給你習慣的 AI 繼續分析。</p>
         </div>
       </section>
+      {capture_panel}
     """
 
 
-def activity_review_panel(activity, split_rows, activity_rows, selected_activity_id, weekly_review=None, monthly_overview=None):
+def activity_review_panel(activity, split_rows, activity_rows, selected_activity_id, weekly_review=None, monthly_overview=None, saved_reply=None):
     if not activity:
         return """
         <section class="panel-section">
@@ -5242,7 +5594,7 @@ def activity_review_panel(activity, split_rows, activity_rows, selected_activity
         <p class="note">如果你想自己驗證教練剛剛為什麼這樣看，完整每公里資料放在這裡。</p>
         {activity_split_table(split_rows)}
       </section>
-      {activity_ai_handoff_panel(activity, review, split_rows, weekly_review, monthly_overview)}
+      {activity_ai_handoff_panel(activity, review, split_rows, weekly_review, monthly_overview, saved_reply)}
     """
 
 
@@ -5474,7 +5826,7 @@ def journey_page_panel(story, timeline_rows, turning_point_rows, available_month
     """
 
 
-def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality_row, history_rows, distribution_rows, key_session_rows, related_week_rows, available_month_rows, selected_month, coach_memory=None):
+def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality_row, history_rows, distribution_rows, key_session_rows, related_week_rows, available_month_rows, selected_month, coach_memory=None, saved_reply=None):
     if not monthly or not intelligence:
         return """
         <section class="panel-section">
@@ -5551,7 +5903,7 @@ def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality
         ("再看形成原因", "#monthly-understanding"),
         ("再看關鍵週", "#monthly-weeks"),
         ("最後回到關鍵課", "#monthly-key-activities"),
-        ("交給 AI 繼續分析", "#monthly-ai-handoff"),
+        ("AI 延伸分析", "#monthly-ai-handoff"),
     ]
 
     return f"""
@@ -5619,7 +5971,7 @@ def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality
         <h2>教練看了哪些關鍵課</h2>
         {monthly_key_sessions_table(key_session_rows)}
       </section>
-      {monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_rows, key_session_rows, related_week_rows, coach_memory)}
+      {monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_rows, key_session_rows, related_week_rows, coach_memory, saved_reply)}
     """
 
 
@@ -5633,6 +5985,7 @@ def weekly_review_panel(
     history_rows_with_labels=None,
     monthly_overview=None,
     overview_attention=None,
+    saved_reply=None,
 ):
     if not weekly or not intelligence:
         return """
@@ -5722,7 +6075,7 @@ def weekly_review_panel(
         <h2>最近 5 週節奏</h2>
         {weekly_history_table(history_rows, selected_week)}
       </section>
-      {weekly_ai_handoff_panel(weekly, intelligence, review, distribution_rows, key_session_rows, history_rows, history_rows_with_labels, monthly_overview, overview_attention)}
+      {weekly_ai_handoff_panel(weekly, intelligence, review, distribution_rows, key_session_rows, history_rows, history_rows_with_labels, monthly_overview, overview_attention, saved_reply)}
     """
 
 
@@ -6862,6 +7215,43 @@ def base_styles():
       color: var(--muted);
       font-size: 13px;
       margin: 8px 0 0;
+    }
+    .ai-reply-parse-state {
+      margin: 4px 0 0;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f7fafb;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.5;
+    }
+    .ai-reply-parsed-preview {
+      display: grid;
+      gap: 8px;
+      margin-top: 10px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f7fafb;
+    }
+    .ai-reply-parsed-preview span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    .ai-reply-parsed-preview textarea {
+      min-height: 180px;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #fff;
+      color: var(--ink);
+      font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      resize: vertical;
     }
     .table-wrap {
       overflow-x: auto;
@@ -8149,6 +8539,52 @@ def base_styles():
       font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       resize: vertical;
     }
+    .ai-reply-form {
+      display: grid;
+      gap: 12px;
+    }
+    .ai-reply-form textarea,
+    .ai-reply-raw textarea {
+      width: 100%;
+      min-height: 220px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      resize: vertical;
+    }
+    .ai-reply-preview {
+      display: grid;
+      gap: 10px;
+    }
+    .ai-reply-rendered {
+      display: grid;
+      gap: 8px;
+      color: var(--ink);
+    }
+    .ai-reply-rendered h3,
+    .ai-reply-rendered h4,
+    .ai-reply-rendered h5 {
+      margin: 0;
+    }
+    .ai-reply-rendered p,
+    .ai-reply-rendered ul {
+      margin: 0;
+    }
+    .ai-reply-rendered ul {
+      padding-left: 20px;
+    }
+    .ai-reply-raw {
+      display: grid;
+      gap: 10px;
+    }
+    .ai-reply-raw summary {
+      cursor: pointer;
+      color: var(--ink);
+      font-weight: 800;
+    }
     code {
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 13px;
@@ -8191,6 +8627,62 @@ def base_styles():
 def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="unassigned", message="", month="", week="", batch="1"):
     handoff_script = """
   <script>
+    function extractAiReplyMarkdown(raw) {
+      const text = (raw || "").trim();
+      if (!text) return { mode: "empty", markdown: "" };
+      const taggedPatterns = [
+        /```running-intelligence-reply\\s*\\n([\\s\\S]*?)```/gi,
+        /```markdown\\s*\\n([\\s\\S]*?)```/gi,
+        /```md\\s*\\n([\\s\\S]*?)```/gi,
+      ];
+      for (let i = 0; i < taggedPatterns.length; i += 1) {
+        const matches = [...text.matchAll(taggedPatterns[i])];
+        if (matches.length) {
+          return { mode: i === 0 ? "tagged" : "markdown", markdown: matches[matches.length - 1][1].trim() };
+        }
+      }
+      const generic = [...text.matchAll(/```[a-zA-Z0-9_-]*\\s*\\n([\\s\\S]*?)```/g)];
+      if (generic.length) {
+        return { mode: "generic", markdown: generic[generic.length - 1][1].trim() };
+      }
+      return { mode: "raw", markdown: text };
+    }
+
+    function refreshAiReplyPreview(form) {
+      const input = form.querySelector("[data-ai-reply-input]");
+      const state = form.querySelector("[data-ai-reply-state]");
+      const preview = form.querySelector("[data-ai-reply-preview]");
+      const previewText = form.querySelector("[data-ai-reply-preview-text]");
+      if (!input || !state || !preview || !previewText) return;
+      const parsed = extractAiReplyMarkdown(input.value || "");
+      if (parsed.mode === "empty") {
+        state.textContent = "尚未貼上 AI 回覆";
+        preview.hidden = true;
+        previewText.value = "";
+        return;
+      }
+      if (parsed.mode === "tagged") {
+        state.textContent = "已辨識 AI 回覆區塊。找到最後一個 running-intelligence-reply，以下內容將被保存。";
+      } else if (parsed.mode === "markdown" || parsed.mode === "generic") {
+        state.textContent = "已辨識 Markdown 區塊。未找到 running-intelligence-reply，將改用最後一個 markdown 區塊。";
+      } else {
+        state.textContent = "未找到可辨識的 Markdown 區塊。平台將保存你貼上的完整內容，請先確認下方預覽是否正確。";
+      }
+      preview.hidden = false;
+      previewText.value = parsed.markdown;
+    }
+
+    document.addEventListener("input", function (event) {
+      const input = event.target.closest("[data-ai-reply-input]");
+      if (!input) return;
+      const form = input.closest("form");
+      if (form) refreshAiReplyPreview(form);
+    });
+
+    document.addEventListener("DOMContentLoaded", function () {
+      document.querySelectorAll("form.ai-reply-form").forEach(refreshAiReplyPreview);
+    });
+
     async function copyAiHandoff(id) {
       const el = document.getElementById(id);
       const status =
@@ -8281,6 +8773,10 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     training_balance_rows = []
     training_quality_row = None
     recent_training_rows = []
+    overview_ai_reply = None
+    activity_ai_reply = None
+    weekly_ai_reply = None
+    monthly_ai_reply = None
     shoe_rows = []
     shoe_status_data = []
     shoe_intelligence_rows = []
@@ -8396,6 +8892,14 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
 
     weekly_review = weekly_review_payload(weekly, intelligence) if weekly and intelligence else None
     monthly_overview = monthly_overview_payload(monthly, monthly_review, monthly_progress_row) if monthly and monthly_review else None
+    if selected:
+        activity_ai_reply = get_ai_reply("activity", str(selected["activity_id"]))
+    if weekly:
+        weekly_ai_reply = get_ai_reply("weekly", f"{weekly['start_date']}:{weekly['end_date']}")
+    if monthly:
+        monthly_ai_reply = get_ai_reply("monthly", str(monthly["month_key"]))
+    if page == "home":
+        overview_ai_reply = get_ai_reply("overview", date.today().isoformat())
 
     html_start = f"""<!doctype html>
 <html lang="zh-Hant">
@@ -8420,7 +8924,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     if page == "weekly":
         return f"""{html_start}
     {weekly_selector_bar(week_rows, selected_week, "weekly")}
-    {weekly_review_panel(weekly, intelligence, weekly_rows, distribution_rows, weekly_key_session_rows, selected_week, weekly_rows_with_labels, monthly_overview, overview_attention)}
+    {weekly_review_panel(weekly, intelligence, weekly_rows, distribution_rows, weekly_key_session_rows, selected_week, weekly_rows_with_labels, monthly_overview, overview_attention, weekly_ai_reply)}
     {archive_metric_strip(summary)}
   </main>
 </body>
@@ -8428,7 +8932,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
 
     if page == "activity":
         return f"""{html_start}
-    {activity_review_panel(selected, split_rows, activity_rows, selected["activity_id"] if selected else "", weekly_review, monthly_overview)}
+    {activity_review_panel(selected, split_rows, activity_rows, selected["activity_id"] if selected else "", weekly_review, monthly_overview, activity_ai_reply)}
     {archive_metric_strip(summary)}
   </main>
 </body>
@@ -8444,7 +8948,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
 
     if page == "monthly":
         return f"""{html_start}
-    {monthly_review_panel(monthly, monthly_review, monthly_progress_row, monthly_assignment_quality_row, monthly_rows, monthly_distribution_rows, monthly_key_session_rows, monthly_related_week_rows, month_rows, selected_month, monthly_memory)}
+    {monthly_review_panel(monthly, monthly_review, monthly_progress_row, monthly_assignment_quality_row, monthly_rows, monthly_distribution_rows, monthly_key_session_rows, monthly_related_week_rows, month_rows, selected_month, monthly_memory, monthly_ai_reply)}
   </main>
 </body>
 </html>"""
@@ -8488,7 +8992,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     return f"""{html_start}
     {message_html}
     {rac_entry_panel()}
-    {coach_desk_panel(overview_attention, weekly_review, monthly_overview, monthly_review, journey_selected_story, latest_activity)}
+    {coach_desk_panel(overview_attention, weekly_review, monthly_overview, monthly_review, journey_selected_story, latest_activity, overview_ai_reply)}
     {archive_metric_strip(summary)}
   </main>
 </body>
@@ -8565,6 +9069,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         length = int(self.headers.get("Content-Length", "0"))
         form = parse_qs(self.rfile.read(length).decode("utf-8"))
+
+        if parsed.path == "/ai-replies/save":
+            surface = first_form_value(form, "surface", "").strip()
+            identifier = first_form_value(form, "identifier", "").strip()
+            title = first_form_value(form, "title", "").strip() or "AI 回覆"
+            page = first_form_value(form, "page", "home").strip() or "home"
+            activity_id = first_form_value(form, "activity_id", "").strip()
+            week = first_form_value(form, "week", "").strip()
+            month = first_form_value(form, "month", "").strip()
+            raw_text = first_form_value(form, "ai_reply_raw", "")
+
+            if not surface or not identifier or not raw_text.strip():
+                message = "貼回內容是空的，先把 AI 回覆貼進來再存。"
+            else:
+                save_ai_reply(surface, identifier, title, raw_text)
+                message = "已把 AI 回覆存回這一頁"
+
+            params = {"page": page, "message": message}
+            if activity_id:
+                params["activity"] = activity_id
+            if week:
+                params["week"] = week
+            if month:
+                params["month"] = month
+            self.redirect("/?" + urlencode(params))
+            return
 
         if parsed.path == "/shoes/add":
             try:

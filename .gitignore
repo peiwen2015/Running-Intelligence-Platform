@@ -10,6 +10,8 @@ __pycache__/
 FIT/
 EXCEL/
 config/garmin_connect.json
+config/local_ai_replies.json
+AI_REPLIES/
 *.fit
 *.xlsx
 analysis_platform/running_analytics.sqlite
