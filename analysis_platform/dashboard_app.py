@@ -2414,9 +2414,9 @@ def overview_attention_payload(connection):
 
     def surface_link(target_surface):
         if target_surface == "weekly":
-            return "查看本週反思", "/?" + urlencode({"page": "weekly"})
+            return "查看本週反思", "/?" + urlencode({"page": "weekly"}) + "#weekly-learning"
         if target_surface == "monthly":
-            return "查看本月定位", "/?" + urlencode({"page": "monthly"})
+            return "查看本月定位", "/?" + urlencode({"page": "monthly"}) + "#monthly-position"
         if target_surface == "shoes":
             return "查看鞋款狀態", "/?" + urlencode({"page": "shoes"})
         return "查看更多", "/?" + urlencode({"page": "home"})
@@ -2538,20 +2538,20 @@ def overview_reasoning_route_panel(attention, weekly_review, monthly_overview, l
             "label": "第一步",
             "title": "先看月回顧",
             "body": monthly_overview["verdict_reason"] if monthly_overview else "先確認你現在位於哪個訓練位置。",
-            "href": "/?" + urlencode({"page": "monthly"}),
+            "href": "/?" + urlencode({"page": "monthly"}) + "#monthly-position",
         })
         routes.append({
             "label": "第二步",
             "title": "再看本週怎麼接",
             "body": weekly_review["focus"] if weekly_review else "再確認這一週有沒有把這個方向接住。",
-            "href": "/?" + urlencode({"page": "weekly"}),
+            "href": "/?" + urlencode({"page": "weekly"}) + "#weekly-learning",
         })
         if latest_activity_href:
             routes.append({
                 "label": "第三步",
                 "title": "最後回到單堂課",
                 "body": f"如果想一路追到底，就回到最近那堂課：{latest_activity_line}",
-                "href": latest_activity_href,
+                "href": latest_activity_href + "#activity-learning",
             })
     elif target_surface == "shoes":
         routes.append({
@@ -2571,20 +2571,20 @@ def overview_reasoning_route_panel(attention, weekly_review, monthly_overview, l
             "label": "第一步",
             "title": "先看週回顧",
             "body": weekly_review["focus"] if weekly_review else "先確認這週真正留下來的學習是什麼。",
-            "href": "/?" + urlencode({"page": "weekly"}),
+            "href": "/?" + urlencode({"page": "weekly"}) + "#weekly-learning",
         })
         if latest_activity_href:
             routes.append({
                 "label": "第二步",
                 "title": "再追到那堂關鍵課",
                 "body": f"如果想知道這個學習是怎麼長出來的，就回到最近那堂課：{latest_activity_line}",
-                "href": latest_activity_href,
+                "href": latest_activity_href + "#activity-learning",
             })
         routes.append({
             "label": "第三步",
             "title": "最後回到月位置",
             "body": monthly_overview["verdict_reason"] if monthly_overview else "最後再確認這週學習放回整個月後，方向有沒有對齊。",
-            "href": "/?" + urlencode({"page": "monthly"}),
+            "href": "/?" + urlencode({"page": "monthly"}) + "#monthly-position",
         })
 
     return f"""
@@ -4285,7 +4285,7 @@ def monthly_related_weeks_table(rows):
         return '<p class="note">這個月目前還沒有足夠的週資料可以串起來。</p>'
     body = []
     for row in rows:
-        href = "/?" + urlencode({"page": "weekly", "week": row["week_offset"]})
+        href = "/?" + urlencode({"page": "weekly", "week": row["week_offset"]}) + "#weekly-learning"
         body.append(
             f"""
             <tr>
@@ -5065,7 +5065,7 @@ def monthly_key_sessions_table(rows):
               <td>{'' if row["avg_hr"] is None else int(round(row["avg_hr"]))}</td>
               <td>{'' if row["training_load"] is None else format_number(row["training_load"], 1)}</td>
               <td>{html.escape(str(row["shoe_display_name"] or ""))}</td>
-              <td>{f'<a class="inline-jump-link" href="/?page=activity&activity_id={int(row["activity_id"])}">看這堂課</a>' if row["activity_id"] else ''}</td>
+              <td>{f'<a class="inline-jump-link" href="/?page=activity&activity={int(row["activity_id"])}#activity-learning">看這堂課</a>' if row["activity_id"] else ''}</td>
             </tr>
             """
         )
