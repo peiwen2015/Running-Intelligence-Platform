@@ -4,6 +4,12 @@
 
 它不是把 Garmin 數據換一種方式排版，而是把每一堂課、每一週、每一個月，重新整理成「值得理解」的訓練回顧。
 
+## Release Status
+
+- `v1.0.0` 已正式發布
+- 產品對外主名稱維持 `Running Intelligence Platform`
+- 核心資料鏈路已固定為 `FIT -> Excel -> SQLite -> Semantic Layer -> Dashboard`
+
 目前產品由兩個一起工作的本機小程式組成：
 
 - `資料匯入工具`  
@@ -160,13 +166,13 @@ docs/      架構與產品文件
 
 ## 對外發布方向
 
-這個 repo 目前準備朝一個新的公開專案整理：
+這個 repo 現在就是正式對外的 `v1.0.0` 版本，後續會在這個基礎上持續收斂：
 
 - 統一名稱：`Running Intelligence Platform`
 - 把資料匯入工具作為產品裡的資料入口，而不是獨立散落的小工具
 - 以 deterministic、本機可用、knowledge-first 的方式建立跑步教練產品
 
-對外 announcement 草稿可參考：
+正式發布說明可參考：
 
 [`LAUNCH_ANNOUNCEMENT.md`](/Users/perryliu/Documents/Running%20Analytics/LAUNCH_ANNOUNCEMENT.md)
 

@@ -63,6 +63,7 @@ Application
 | SQLite Importer / Parser | Internal milestone E2E-002 | SQLite Schema v1.0 real-data verified | Project root |
 | Excel Schema | v1.1 | Active | `40_Excel/` |
 | Query Layer | v1.0 | Reads Semantic Layer views | `analysis_platform/` |
+| Running Intelligence Platform | v1.0.0 | Released | Project root |
 | Dashboard App | v0.4.12-alpha | Weekly Polish reframed the week page as a coaching review meeting with verdict, focus, why, and next | `analysis_platform/dashboard_app.py` |
 | AI Coach | Not released | Pending | `50_AI/` |
 

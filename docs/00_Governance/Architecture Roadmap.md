@@ -68,8 +68,7 @@ flowchart TD
 | v1.32 | Semantic Layer v1.0 | In progress |
 | v1.35 | First end-to-end pipeline verified | Complete |
 | v1.4 | Parser stable against Metadata Repository | In progress |
-| Platform v0.1.0-preview | Dashboard MVP / Running Intelligence Platform preview | In progress |
-| Platform v0.1.0 | First platform release | Pending |
+| Platform v1.0.0 | First platform release | Released |
 | v2.0 | AI Coach | Pending |
 | v3.0 | Digital Twin Runner | Future |
 
@@ -93,6 +92,7 @@ flowchart TD
 | SQLite Importer / Parser | Internal milestone E2E-002 | SQLite Schema v1.0 real-data verified |
 | Excel Schema | v1.1 | Active |
 | Dashboard App | v0.4.12-alpha | Weekly Polish reframed the week page as a coaching review meeting with verdict, focus, why, and next |
+| Running Intelligence Platform | v1.0.0 | Released |
 
 ## Current Semantic Layer Milestone
 

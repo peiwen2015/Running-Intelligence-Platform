@@ -1,57 +1,64 @@
-# Running Intelligence Platform
+# Running Intelligence Platform v1.0.0 正式發布
 
 Running Intelligence Platform 是一個本機優先、knowledge-first 的跑步分析產品。
 
-它不是用 AI 直接生成一段看起來像教練的文字，而是先把跑步資料治理好，再用 deterministic 的方式，把每一堂課、每一週、每一個月整理成真正有教練意義的判讀。
+`v1.0.0` 代表這個專案已經不是草稿，而是可以正式對外介紹的版本。
+它把 Garmin 跑步資料整理成一條穩定的產品鏈路，讓跑者可以用更接近教練的方式理解訓練。
 
-目前產品包含兩個一起工作的部分：
+## 這次發布包含什麼
 
 - `資料匯入工具`：把 Garmin FIT 轉成 Excel 與 SQLite
-- `Running Intelligence Platform`：把資料變成 Activity / Weekly / Monthly / Overview 的教練式回顧
+- `Running Intelligence Platform`：把資料變成 Activity / Overview / Weekly / Monthly 的教練式回顧
+- `Semantic Layer v1.0`：把重複的 SQL 與頁面邏輯收斂成可重用的產品語意
+- `SQLite Schema v1.0`：已完成真實資料驗證的核心物理模型
+- `Metadata Repository v1.1`：把產品裡的關鍵名詞與規則先治理好
 
-這個產品想回答的不是：
-
-- 今天跑了多少？
-- 配速多少？
-- 負荷多少？
-
-而是：
+## 產品現在回答的問題
 
 - 這堂課真正練到了什麼？
 - 這週身體學到了什麼？
 - 這個月目前位於哪個訓練位置？
 - 今天最該關心的是什麼？
 
-如果一般跑步平台是在幫你讀數據，
-
-Running Intelligence Platform 想做的，是幫跑者慢慢學會像教練一樣理解訓練。
-
-## Current product surfaces
+## 目前公開的產品面
 
 - `Activity`
 - `Overview`
 - `Weekly`
 - `Monthly`
 
-## Current status
+`Journey` 目前仍保留在程式裡，但暫時不作為公開產品面。
 
-- Monthly: stable
-- Weekly: beta
-- Overview: beta
-- Activity: MVP, but already functioning as a real event-driven entry
+## 使用方式
 
-## Product philosophy
+macOS：
 
-We don’t design products. We discover them.
+```text
+Running Intelligence Platform.command
+```
 
-不是先發明一個漂亮的架構，再把產品塞進去。  
-而是先讓真實使用情境逼出第一個問題，再讓頁面自己長出來。
+Windows：
 
-這也是為什麼：
+```text
+Running Intelligence Platform.bat
+```
 
-- Monthly 最後回答的是「我現在在哪？」
-- Weekly 最後回答的是「這週，我到底練到了什麼？」
-- Activity 最後回答的是「這堂課，我真正練到了什麼？」
-- Overview 最後回答的是「今天，我最該關心的是什麼？」
+或直接啟動平台：
 
-這個 repo 目前是公開整理的起點。下一步會是把產品、文件、版本與入口再收得更乾淨，讓整體更像一個真正一致的 running product，而不是幾個分散的小工具。
+```bash
+python3 analysis_platform/dashboard_app.py analysis_platform/running_analytics.sqlite
+```
+
+資料匯入工具也可以獨立啟動：
+
+```bash
+python3 app.py
+```
+
+## 這個 release 的意義
+
+這次不是單純把一組檔案整理成可以打包的形式，
+而是把產品、文件、版本與入口收斂成一個可以長期維護的本機跑步分析系統。
+
+如果一般跑步平台是在幫你讀數據，
+Running Intelligence Platform 想做的，是幫跑者慢慢學會像教練一樣理解訓練。
