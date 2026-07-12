@@ -2259,6 +2259,12 @@ def overview_ai_handoff_text(attention, weekly_review, monthly_overview, latest_
     if not attention:
         return ""
 
+    def safe_text(value, fallback="—"):
+        if value is None:
+            return fallback
+        text = str(value).strip()
+        return text if text else fallback
+
     target_surface = attention.get("target_surface") or "weekly"
     surface_label_map = {
         "activity": "單堂課",
@@ -2274,14 +2280,14 @@ def overview_ai_handoff_text(attention, weekly_review, monthly_overview, latest_
         "只能根據我提供的內容分析，不要自行發明額外訓練、健康或心理狀態。",
         "",
         "## Overview Facts",
-        f"- Today Focus：{attention['title']}",
-        f"- Why Now：{attention['why']}",
+        f"- Today Focus：{safe_text(attention.get('title'))}",
+        f"- Why Now：{safe_text(attention.get('why'))}",
         f"- Primary Route：{target_label}",
-        f"- Continue Link：{attention['cta']}",
+        f"- Continue Link：{safe_text(attention.get('cta'))}",
     ]
 
     if attention.get("secondary_note"):
-        prompt_lines.append(f"- Secondary Note：{attention['secondary_note']}")
+        prompt_lines.append(f"- Secondary Note：{safe_text(attention.get('secondary_note'))}")
 
     if attention.get("evidence"):
         prompt_lines.extend([
@@ -2294,18 +2300,18 @@ def overview_ai_handoff_text(attention, weekly_review, monthly_overview, latest_
         prompt_lines.extend([
             "",
             "## Weekly Context",
-            f"- Focus：{weekly_review['focus']}",
-            f"- Learning：{weekly_review['learning']}",
-            f"- Next：{weekly_review['looking_forward']}",
+            f"- Focus：{safe_text(weekly_review.get('focus'))}",
+            f"- Learning：{safe_text(weekly_review.get('learning'))}",
+            f"- Next：{safe_text(weekly_review.get('looking_forward'))}",
         ])
 
     if monthly_overview:
         prompt_lines.extend([
             "",
             "## Monthly Context",
-            f"- Position：{monthly_overview['verdict']}",
-            f"- Phase：{monthly_overview['phase']}",
-            f"- Summary：{monthly_overview['verdict_reason']}",
+            f"- Position：{safe_text(monthly_overview.get('verdict'))}",
+            f"- Phase：{safe_text(monthly_overview.get('phase'))}",
+            f"- Summary：{safe_text(monthly_overview.get('verdict_reason'))}",
         ])
         if monthly_overview.get("progress_pct") is not None:
             prompt_lines.append(f"- Progress：{format_number(monthly_overview['progress_pct'], 0)}%")
@@ -2314,15 +2320,15 @@ def overview_ai_handoff_text(attention, weekly_review, monthly_overview, latest_
         prompt_lines.extend([
             "",
             "## Latest Activity",
-            f"- Date：{format_short_datetime(latest_activity['activity_start_time'])}",
-            f"- Activity：{latest_activity['activity_name'] or latest_activity['activity_type'] or '活動'}",
+            f"- Date：{safe_text(format_short_datetime(latest_activity['activity_start_time']))}",
+            f"- Activity：{safe_text(latest_activity['activity_name'] or latest_activity['activity_type'] or '活動')}",
             f"- Distance：{format_number(latest_activity['distance_km'], 2) or '—'} km",
             f"- Pace：{format_pace_seconds(latest_activity['avg_pace_sec_per_km']) or '—'}",
             f"- HR：{'' if latest_activity['avg_hr'] is None else int(round(latest_activity['avg_hr']))}",
             f"- Load：{format_number(latest_activity['training_load'], 1) or '—'}",
-            f"- Workout：{latest_activity['workout_type_name_en'] or '未標註'}",
-            f"- Purpose：{latest_activity['primary_training_purpose_name_en'] or '未標註'}",
-            f"- Shoe：{latest_activity['shoe_display_name'] or '未標註'}",
+            f"- Workout：{safe_text(latest_activity['workout_type_name_en'] or '未標註')}",
+            f"- Purpose：{safe_text(latest_activity['primary_training_purpose_name_en'] or '未標註')}",
+            f"- Shoe：{safe_text(latest_activity['shoe_display_name'] or '未標註')}",
         ])
 
     prompt_lines.extend([
@@ -2366,6 +2372,7 @@ def overview_ai_handoff_panel(attention, weekly_review, monthly_overview, latest
               <textarea id="overview-ai-handoff-text" readonly>{html.escape(handoff_text)}</textarea>
             </details>
           </div>
+          <p class="note" id="overview-ai-handoff-status">先看完總覽，再複製交給你習慣的 AI 繼續分析。</p>
         </div>
       </section>
     """
@@ -2704,30 +2711,50 @@ def selected_activity(connection, activity_id):
         row = connection.execute(
             """
             SELECT
-                activity_id,
-                activity_start_time,
-                activity_type,
-                activity_name,
-                distance_km,
-                duration_sec,
-                workout_type_id,
-                shoe_id,
-                workout_type_name_en,
-                shoe_display_name,
-                primary_training_purpose_name_en,
-                secondary_training_purpose_names_en,
-                avg_pace_sec_per_km,
-                avg_hr,
-                training_load,
-                stamina_start_pct,
-                stamina_end_pct,
-                temperature_c,
-                humidity_pct,
-                weather_description,
-                garmin_feeling,
-                garmin_perceived_effort
-            FROM activity_review_view
-            WHERE activity_id = ?
+                review.activity_id,
+                activity.garmin_activity_id,
+                activity.source_file_name,
+                activity.data_source,
+                activity.excel_schema_version,
+                review.activity_start_time,
+                review.activity_type,
+                review.activity_name,
+                review.distance_km,
+                review.duration_sec,
+                review.workout_type_id,
+                review.shoe_id,
+                review.workout_type_name_en,
+                review.shoe_display_name,
+                review.primary_training_purpose_name_en,
+                review.secondary_training_purpose_names_en,
+                review.avg_pace_sec_per_km,
+                review.avg_hr,
+                review.max_hr,
+                review.training_load,
+                review.training_effect_aerobic,
+                review.training_effect_anaerobic,
+                review.recovery_time_hr,
+                review.stamina_start_pct,
+                review.stamina_end_pct,
+                review.temperature_c,
+                review.humidity_pct,
+                review.wind_speed_mps,
+                review.wind_direction_deg,
+                review.weather_description,
+                review.avg_cadence_spm,
+                review.avg_stride_length_mm,
+                review.avg_gct_ms,
+                review.avg_vertical_oscillation_mm,
+                review.avg_vertical_ratio_pct,
+                activity.critical_power_w,
+                review.nutrition,
+                review.notes,
+                review.garmin_feeling,
+                review.garmin_perceived_effort
+            FROM activity_review_view AS review
+            JOIN activity
+              ON activity.id = review.activity_id
+            WHERE review.activity_id = ?
             """,
             (activity_id,),
         ).fetchone()
@@ -2736,30 +2763,50 @@ def selected_activity(connection, activity_id):
     return connection.execute(
         """
         SELECT
-            activity_id,
-            activity_start_time,
-            activity_type,
-            activity_name,
-            distance_km,
-            duration_sec,
-            workout_type_id,
-            shoe_id,
-            workout_type_name_en,
-            shoe_display_name,
-            primary_training_purpose_name_en,
-            secondary_training_purpose_names_en,
-            avg_pace_sec_per_km,
-            avg_hr,
-            training_load,
-            stamina_start_pct,
-            stamina_end_pct,
-            temperature_c,
-            humidity_pct,
-            weather_description,
-            garmin_feeling,
-            garmin_perceived_effort
-        FROM activity_review_view
-        ORDER BY activity_start_time DESC
+            review.activity_id,
+            activity.garmin_activity_id,
+            activity.source_file_name,
+            activity.data_source,
+            activity.excel_schema_version,
+            review.activity_start_time,
+            review.activity_type,
+            review.activity_name,
+            review.distance_km,
+            review.duration_sec,
+            review.workout_type_id,
+            review.shoe_id,
+            review.workout_type_name_en,
+            review.shoe_display_name,
+            review.primary_training_purpose_name_en,
+            review.secondary_training_purpose_names_en,
+            review.avg_pace_sec_per_km,
+            review.avg_hr,
+            review.max_hr,
+            review.training_load,
+            review.training_effect_aerobic,
+            review.training_effect_anaerobic,
+            review.recovery_time_hr,
+            review.stamina_start_pct,
+            review.stamina_end_pct,
+            review.temperature_c,
+            review.humidity_pct,
+            review.wind_speed_mps,
+            review.wind_direction_deg,
+            review.weather_description,
+            review.avg_cadence_spm,
+            review.avg_stride_length_mm,
+            review.avg_gct_ms,
+            review.avg_vertical_oscillation_mm,
+            review.avg_vertical_ratio_pct,
+            activity.critical_power_w,
+            review.nutrition,
+            review.notes,
+            review.garmin_feeling,
+            review.garmin_perceived_effort
+        FROM activity_review_view AS review
+        JOIN activity
+          ON activity.id = review.activity_id
+        ORDER BY review.activity_start_time DESC
         LIMIT 1
         """
     ).fetchone()
@@ -2773,10 +2820,20 @@ def splits(connection, activity_id):
         SELECT
             split_index,
             split_distance_m,
+            elapsed_time_sec,
             elapsed_pace_sec_per_km,
             avg_hr,
+            max_hr,
             avg_power_w,
-            avg_cadence_spm
+            avg_cadence_spm,
+            avg_stride_length_mm,
+            avg_gct_ms,
+            avg_vertical_ratio_pct,
+            avg_vertical_oscillation_mm,
+            elevation_gain_m,
+            elevation_loss_m,
+            stamina_start_pct,
+            stamina_end_pct
         FROM kilometer_split_view
         WHERE activity_id = ?
         ORDER BY split_index
@@ -4394,6 +4451,7 @@ def monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_r
               <textarea id="monthly-ai-handoff-text" readonly>{html.escape(handoff_text)}</textarea>
             </details>
           </div>
+          <p class="note" id="monthly-ai-handoff-status">先看完這個月，再複製交給你習慣的 AI 繼續分析。</p>
         </div>
       </section>
     """
@@ -4625,6 +4683,22 @@ def activity_ai_handoff_text(activity, review, split_rows, weekly_review=None, m
     if not activity or not review:
         return ""
 
+    def raw_text(value, fallback="—"):
+        if value is None:
+            return fallback
+        text = str(value).strip()
+        return text if text else fallback
+
+    temperature_text = f"{format_number(activity['temperature_c'], 0)}°C" if activity["temperature_c"] is not None else None
+    humidity_text = f"{format_number(activity['humidity_pct'], 0)}%" if activity["humidity_pct"] is not None else None
+    wind_speed_text = format_number(activity["wind_speed_mps"], 1) if activity["wind_speed_mps"] is not None else None
+    wind_direction_text = format_number(activity["wind_direction_deg"], 0) if activity["wind_direction_deg"] is not None else None
+    cadence_text = format_number(activity["avg_cadence_spm"], 1) if activity["avg_cadence_spm"] is not None else None
+    stride_text = format_number(activity["avg_stride_length_mm"], 0) if activity["avg_stride_length_mm"] is not None else None
+    gct_text = format_number(activity["avg_gct_ms"], 0) if activity["avg_gct_ms"] is not None else None
+    vosc_text = format_number(activity["avg_vertical_oscillation_mm"], 1) if activity["avg_vertical_oscillation_mm"] is not None else None
+    vratio_text = format_number(activity["avg_vertical_ratio_pct"], 1) if activity["avg_vertical_ratio_pct"] is not None else None
+
     activity_name = str(activity["activity_name"] or activity["activity_type"] or "活動")
     workout_name = str(activity["workout_type_name_en"] or activity["activity_type"] or "活動")
     start_time = format_short_datetime(activity["activity_start_time"])
@@ -4696,19 +4770,56 @@ def activity_ai_handoff_text(activity, review, split_rows, weekly_review=None, m
         prompt_lines.extend([
             "",
             "## Evidence",
+            "### 完整活動資料",
+            f"- Garmin Activity ID：{raw_text(activity['garmin_activity_id'])}",
+            f"- Source File：{raw_text(activity['source_file_name'])}",
+            f"- Data Source：{raw_text(activity['data_source'])}",
+            f"- Excel Schema Version：{raw_text(activity['excel_schema_version'])}",
+            f"- Duration：{format_hours(activity['duration_sec']) or '—'}",
+            f"- Temperature：{raw_text(temperature_text)}",
+            f"- Humidity：{raw_text(humidity_text)}",
+            f"- Wind Speed：{raw_text(wind_speed_text)}",
+            f"- Wind Direction：{raw_text(wind_direction_text)}",
+            f"- Weather：{raw_text(activity['weather_description'])}",
+            f"- Max HR：{raw_text(activity['max_hr'])}",
+            f"- Critical Power：{raw_text(activity['critical_power_w'])}",
+            f"- Training Effect Aerobic：{raw_text(activity['training_effect_aerobic'])}",
+            f"- Training Effect Anaerobic：{raw_text(activity['training_effect_anaerobic'])}",
+            f"- Recovery Time：{raw_text(activity['recovery_time_hr'])}",
+            f"- Stamina Start：{raw_text(activity['stamina_start_pct'])}",
+            f"- Stamina End：{raw_text(activity['stamina_end_pct'])}",
+            f"- Avg Cadence：{raw_text(cadence_text)}",
+            f"- Avg Stride Length：{raw_text(stride_text)}",
+            f"- Avg GCT：{raw_text(gct_text)}",
+            f"- Avg Vertical Oscillation：{raw_text(vosc_text)}",
+            f"- Avg Vertical Ratio：{raw_text(vratio_text)}",
+            f"- Garmin Feeling：{raw_text(activity['garmin_feeling'])}",
+            f"- Garmin RPE：{raw_text(activity['garmin_perceived_effort'])}",
+            f"- Nutrition：{raw_text(activity['nutrition'])}",
+            f"- Notes：{raw_text(activity['notes'])}",
+            "",
             "### 完整每公里 split 原始資料",
-            "| KM | 距離 | 配速 | HR | 功率 | 步頻 |",
-            "| --- | --- | --- | --- | --- | --- |",
+            "| KM | 距離 | 配速 | Avg HR | Max HR | 功率 | 步頻 | 步幅 | GCT | 垂直比 | 垂直振幅 | 爬升 | 下降 | Stamina Start | Stamina End |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ])
         for row in split_rows:
             prompt_lines.append(
-                "| {km} | {distance} | {pace} | {hr} | {power} | {cadence} |".format(
+                "| {km} | {distance} | {pace} | {hr} | {max_hr} | {power} | {cadence} | {stride} | {gct} | {vratio} | {vosc} | {gain} | {loss} | {stamina_start} | {stamina_end} |".format(
                     km=row["split_index"],
                     distance=format_number((row["split_distance_m"] or 0) / 1000, 2) or "—",
                     pace=format_pace_seconds(row["elapsed_pace_sec_per_km"]) or "—",
                     hr="" if row["avg_hr"] is None else int(round(row["avg_hr"])),
+                    max_hr="" if row["max_hr"] is None else int(round(row["max_hr"])),
                     power="" if row["avg_power_w"] is None else int(round(row["avg_power_w"])),
                     cadence="" if row["avg_cadence_spm"] is None else format_number(row["avg_cadence_spm"], 1),
+                    stride="" if row["avg_stride_length_mm"] is None else format_number(row["avg_stride_length_mm"], 0),
+                    gct="" if row["avg_gct_ms"] is None else format_number(row["avg_gct_ms"], 0),
+                    vratio="" if row["avg_vertical_ratio_pct"] is None else format_number(row["avg_vertical_ratio_pct"], 1),
+                    vosc="" if row["avg_vertical_oscillation_mm"] is None else format_number(row["avg_vertical_oscillation_mm"], 1),
+                    gain="" if row["elevation_gain_m"] is None else format_number(row["elevation_gain_m"], 1),
+                    loss="" if row["elevation_loss_m"] is None else format_number(row["elevation_loss_m"], 1),
+                    stamina_start="" if row["stamina_start_pct"] is None else row["stamina_start_pct"],
+                    stamina_end="" if row["stamina_end_pct"] is None else row["stamina_end_pct"],
                 )
             )
 
@@ -4746,12 +4857,12 @@ def activity_ai_handoff_panel(activity, review, split_rows, weekly_review=None, 
         <div class="review-card ai-handoff-card">
           <span>AI Share Handoff</span>
           <strong>把這堂課的教練脈絡直接交給你習慣的 AI</strong>
-          <p>如果你看完這堂課後，想沿著平台已經整理好的判讀、片段與 raw data 繼續往下聊，這裡就是完整交棒內容。</p>
+          <p>如果你看完這堂課後，想沿著平台已經整理好的判讀、片段與完整活動資料繼續往下聊，這裡就是完整交棒內容。</p>
           <div class="ai-handoff-block">
             <div class="ai-handoff-block-head">
               <div>
                 <strong>完整 handoff</strong>
-                <p class="note">包含教練判讀、形成原因、關鍵片段、上下文與完整 split evidence。</p>
+                <p class="note">包含教練判讀、形成原因、關鍵片段、上下文、完整活動欄位與完整 split evidence。</p>
               </div>
               <div class="ai-handoff-actions">
                 <button class="secondary-action" type="button" onclick="copyAiHandoff('activity-ai-handoff')">複製給 AI</button>
@@ -7809,15 +7920,39 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
   <script>
     async function copyAiHandoff(id) {
       const el = document.getElementById(id);
-      const status = document.getElementById(id + "-status") || document.getElementById("activity-ai-handoff-status");
+      const status =
+        document.getElementById(id + "-status") ||
+        document.getElementById("activity-ai-handoff-status") ||
+        document.getElementById("weekly-ai-handoff-status") ||
+        document.getElementById("monthly-ai-handoff-status") ||
+        document.getElementById("overview-ai-handoff-status");
       if (!el) return;
+      const text = typeof el.value === "string" && el.value.length ? el.value : (el.textContent || "").trim();
+      if (!text) {
+        if (status) status.textContent = "這段 handoff 目前是空的，請重新整理後再試一次。";
+        return;
+      }
       try {
-        await navigator.clipboard.writeText(el.value);
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          throw new Error("clipboard-unavailable");
+        }
         if (status) status.textContent = "已複製，現在可以直接貼到你習慣的 AI。";
       } catch (error) {
         el.focus();
         el.select();
-        if (status) status.textContent = "這台瀏覽器不支援直接複製，已幫你選取內容。";
+        let copied = false;
+        try {
+          copied = document.execCommand("copy");
+        } catch (_ignored) {
+          copied = false;
+        }
+        if (status) {
+          status.textContent = copied
+            ? "已複製，現在可以直接貼到你習慣的 AI。"
+            : "這台瀏覽器不支援直接複製，已幫你選取內容。";
+        }
       }
     }
   </script>
