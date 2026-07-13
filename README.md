@@ -6,7 +6,7 @@
 
 ## Release Status
 
-- `v1.0.0` 已正式發布
+- `v1.2.0` 已正式發布
 - 產品對外主名稱維持 `CoachOS`
 - 核心資料鏈路已固定為 `FIT -> Excel -> SQLite -> Semantic Layer -> Dashboard`
 - `AI 延伸分析` 可把整理結果複製給 AI，並可將回覆寫回頁面
@@ -181,15 +181,17 @@ docs/      架構與產品文件
 
 ## 對外發布方向
 
-這個 repo 現在就是正式對外的 `v1.0.0` 版本，後續會在這個基礎上持續收斂：
+這個 repo 現在就是正式對外的 `v1.2.0` 版本，後續會在這個基礎上持續收斂：
 
 - 統一名稱：`CoachOS`
 - 把資料匯入工具作為產品裡的資料入口，而不是獨立散落的小工具
 - 以 deterministic、本機可用、knowledge-first 的方式建立跑步教練產品
 
-正式發布說明可參考：
+正式發布說明與版本備註可參考：
 
 [`LAUNCH_ANNOUNCEMENT.md`](/Users/perryliu/Documents/Running%20Analytics/LAUNCH_ANNOUNCEMENT.md)
+
+[`RELEASE_NOTES_v1.2.0.md`](/Users/perryliu/Documents/Running%20Analytics/RELEASE_NOTES_v1.2.0.md)
 
 ---
 

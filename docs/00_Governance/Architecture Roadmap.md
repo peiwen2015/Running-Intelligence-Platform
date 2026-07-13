@@ -92,7 +92,7 @@ flowchart TD
 | SQLite Importer / Parser | Internal milestone E2E-002 | SQLite Schema v1.0 real-data verified |
 | Excel Schema | v1.1 | Active |
 | Dashboard App | v0.4.12-alpha | Weekly Polish reframed the week page as a coaching review meeting with verdict, focus, why, and next |
-| CoachOS | v1.0.0 | Released |
+| CoachOS | v1.2.0 | Released |
 
 ## Current Semantic Layer Milestone
 
