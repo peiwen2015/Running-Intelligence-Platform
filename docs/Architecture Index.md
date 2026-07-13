@@ -28,6 +28,11 @@ Application
 |---|---:|---|---|
 | Metadata Repository | v1.1 | Active | `00_Governance/Running Analytics Metadata Repository v1.1.md` |
 | Metadata Design Standard | v1.0 | Active | `00_Governance/Metadata Design Standard v1.0.md` |
+| CoachOS Product Knowledge Architecture | v1.0 | Draft | `00_Governance/CoachOS Product Knowledge Architecture v1.0.md` |
+| CoachOS Interaction Principles | v1.0 | Draft | `00_Governance/CoachOS Interaction Principles v1.0.md` |
+| CoachOS Review Checklist | v1.0 | Active | `00_Governance/CoachOS Review Checklist v1.0.md` |
+| CoachOS v1.1 Coach Knowledge | Draft | Product theme | `00_Governance/CoachOS v1.1 Coach Knowledge.md` |
+| Metadata Tagging Experience | v1.0 | Draft chapter | `00_Governance/Metadata Tagging Experience v1.0.md` |
 | Architecture Principles | v1.0 | Active | `00_Governance/Architecture Principles.md` |
 | Product Design Principles | v1.0 | Active | `00_Governance/Product Design Principles v1.0.md` |
 | Journey Product Vision | v0.1 | Active | `00_Governance/Journey Product Vision v0.1.md` |

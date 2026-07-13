@@ -51,6 +51,63 @@ RAC_LOG_PATH = PROJECT_ROOT / "tmp" / "rac_server.log"
 HOST = "127.0.0.1"
 PORT = 8766
 DB_PATH = DEFAULT_DB_PATH
+DROPDOWN_SOURCE_TABLE = "dropdown_source"
+FEEDBACK_DICTIONARY_TABLE = "feedback_dictionary_option"
+
+FEEDBACK_DICTIONARY_LABELS = {
+    "garmin_rpe": "感受難度",
+    "garmin_feel": "感覺如何",
+}
+
+FEEDBACK_DICTIONARY_PLACEHOLDERS = {
+    "garmin_rpe": "例如 1 - 非常輕鬆",
+    "garmin_feel": "例如 普通",
+}
+
+FEEDBACK_DICTIONARY_FALLBACKS = {
+    "garmin_rpe": [
+        "1 - 非常輕鬆",
+        "2 - 輕鬆",
+        "3 - 中等",
+        "4 - 有點難",
+        "5 - 困難",
+        "6 - 困難",
+        "7 - 非常困難",
+        "8 - 非常困難",
+        "9 - 超級難",
+        "10 - 極限",
+    ],
+    "garmin_feel": [
+        "非常弱",
+        "弱",
+        "普通",
+        "強",
+        "非常強",
+    ],
+}
+
+FEEDBACK_DICTIONARY_SEED_PATH = ROOT / "feedback_dictionary_seed.json"
+
+
+def _load_feedback_dictionary_seed():
+    defaults = {key: list(value) for key, value in FEEDBACK_DICTIONARY_FALLBACKS.items()}
+    if not FEEDBACK_DICTIONARY_SEED_PATH.exists():
+        return defaults
+    try:
+        loaded = json.loads(FEEDBACK_DICTIONARY_SEED_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return defaults
+    if isinstance(loaded, dict):
+        for key in defaults:
+            values = loaded.get(key)
+            if isinstance(values, list):
+                cleaned = [str(item).strip() for item in values if str(item).strip()]
+                if cleaned:
+                    defaults[key] = cleaned
+    return defaults
+
+
+FEEDBACK_DICTIONARY_DEFAULTS = _load_feedback_dictionary_seed()
 
 DEFAULT_DROPDOWN_OPTIONS = {
     "shoes": [],
@@ -68,6 +125,7 @@ DEFAULT_DROPDOWN_OPTIONS = {
         "Race（比賽）",
         "Other（其他）",
     ],
+    "workout_focus_map": {},
     "training_focus": [
         "Recovery（恢復）",
         "Aerobic Base（有氧基礎）",
@@ -87,6 +145,80 @@ DEFAULT_DROPDOWN_OPTIONS = {
 }
 
 SHOE_DIMENSION_DEFAULTS = {}
+
+WORKOUT_PURPOSE_DEFAULTS = {
+    "recovery_run": ("recovery", "maintenance"),
+    "easy_run": ("aerobic_base", "maintenance"),
+    "easy_run_strides": ("aerobic_base", "neuromuscular"),
+    "lsd": ("endurance", "aerobic_base"),
+    "progressive_lsd": ("endurance", "race_specific"),
+    "long_run": ("endurance", "aerobic_base"),
+    "marathon_pace": ("race_specific", "threshold"),
+    "tempo_run": ("threshold", "race_specific"),
+    "cruise_interval": ("threshold", "race_specific"),
+    "interval": ("vo2max", "speed"),
+    "repetition": ("speed", "neuromuscular"),
+    "fartlek": ("speed", "running_economy"),
+    "race": ("race", "race_specific"),
+    "progression_run": ("endurance", "race_specific"),
+    "other": ("maintenance", None),
+}
+
+WORKOUT_INTENSITY_LABELS_ZH = {
+    "Quality": "高強度",
+    "Easy": "輕鬆",
+    "Recovery": "恢復",
+    "Moderate": "中等",
+    "Race": "比賽",
+    "Endurance": "耐力",
+    "Threshold": "閾值",
+    "VO2max": "VO2max",
+    "Speed": "速度",
+    "Technique": "技術",
+    "Environmental": "環境",
+    "Maintenance": "維持",
+}
+
+PURPOSE_CATEGORY_LABELS_ZH = {
+    "Recovery": "恢復",
+    "Aerobic": "有氧",
+    "Endurance": "耐力",
+    "Race": "比賽",
+    "Threshold": "閾值",
+    "VO2max": "VO2max",
+    "Speed": "速度",
+    "Technique": "技術",
+    "Environmental": "環境",
+    "Maintenance": "維持",
+}
+
+WORKOUT_INTENSITY_OPTIONS = [
+    ("Recovery", "恢復"),
+    ("Easy", "輕鬆"),
+    ("Moderate", "中等"),
+    ("Endurance", "耐力"),
+    ("Race", "比賽"),
+    ("Threshold", "閾值"),
+    ("VO2max", "VO2max"),
+    ("Speed", "速度"),
+    ("Technique", "技術"),
+    ("Environmental", "環境"),
+    ("Maintenance", "維持"),
+    ("Quality", "高強度"),
+]
+
+PURPOSE_CATEGORY_OPTIONS = [
+    ("Recovery", "恢復"),
+    ("Aerobic", "有氧"),
+    ("Endurance", "耐力"),
+    ("Race", "比賽"),
+    ("Threshold", "閾值"),
+    ("VO2max", "VO2max"),
+    ("Speed", "速度"),
+    ("Technique", "技術"),
+    ("Environmental", "環境"),
+    ("Maintenance", "維持"),
+]
 
 WORKOUT_TYPE_DIMENSION_DEFAULTS = {
     "Recovery Run": ("recovery_run", "Recovery Run", "恢復跑", "Recovery", 0, 0, 1, 10, "#7CB7B8"),
@@ -610,6 +742,8 @@ def connect():
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     ensure_semantic_layer(connection)
+    ensure_dropdown_sources(connection)
+    ensure_workout_purpose_map(connection)
     return connection
 
 
@@ -620,46 +754,294 @@ def first_form_value(form, key, default=""):
     return values[0]
 
 
-def load_metadata_dropdown_options():
-    options = {
-        key: list(value)
-        for key, value in DEFAULT_DROPDOWN_OPTIONS.items()
-    }
-    if not CONFIG_PATH.exists():
-        return options
-    try:
-        loaded = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return options
-    for key in ("shoes", "workout_types", "training_focus"):
-        if isinstance(loaded.get(key), list):
-            options[key] = [str(item).strip() for item in loaded[key] if str(item).strip()]
+def _default_dropdown_options():
+    options = {}
+    for key, value in DEFAULT_DROPDOWN_OPTIONS.items():
+        options[key] = dict(value) if isinstance(value, dict) else list(value)
     return options
 
 
-def save_metadata_dropdown_options(options):
-    current = {}
-    if CONFIG_PATH.exists():
-        try:
-            current = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            current = {}
+def _load_legacy_dropdown_options():
+    if not CONFIG_PATH.exists():
+        return {}
+    try:
+        loaded = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    options = {}
+    for key in ("shoes", "workout_types", "garmin_rpe", "garmin_feel", "training_focus"):
+        if isinstance(loaded.get(key), list):
+            options[key] = [str(item).strip() for item in loaded[key] if str(item).strip()]
+    if isinstance(loaded.get("workout_focus_map"), dict):
+        options["workout_focus_map"] = {
+            str(map_key).strip(): [str(item).strip() for item in map_value if str(item).strip()]
+            for map_key, map_value in loaded["workout_focus_map"].items()
+            if str(map_key).strip() and isinstance(map_value, list)
+        }
+    return options
 
-    merged = dict(current)
-    merged.update(options)
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(
-        json.dumps(merged, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+
+def ensure_dropdown_sources(connection):
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {DROPDOWN_SOURCE_TABLE} (
+            source_key TEXT PRIMARY KEY,
+            source_json TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    existing_keys = {
+        row["source_key"]
+        for row in connection.execute(f"SELECT source_key FROM {DROPDOWN_SOURCE_TABLE}").fetchall()
+    }
+    seed_options = _load_legacy_dropdown_options() if not existing_keys else {}
+    for key, default_value in DEFAULT_DROPDOWN_OPTIONS.items():
+        if key in existing_keys:
+            continue
+        value = seed_options.get(key, default_value)
+        connection.execute(
+            f"""
+            INSERT INTO {DROPDOWN_SOURCE_TABLE} (source_key, source_json, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(source_key) DO UPDATE SET
+                source_json = excluded.source_json,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (key, json.dumps(value, ensure_ascii=False)),
+        )
+
+
+def ensure_feedback_dictionary_options(connection, seed_options=None):
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {FEEDBACK_DICTIONARY_TABLE} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dictionary_key TEXT NOT NULL,
+            label TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(dictionary_key, label)
+        )
+        """
+    )
+    seed_options = seed_options or {}
+    for dictionary_key, default_values in FEEDBACK_DICTIONARY_DEFAULTS.items():
+        existing_count = connection.execute(
+            f"SELECT COUNT(*) AS count FROM {FEEDBACK_DICTIONARY_TABLE} WHERE dictionary_key = ?",
+            (dictionary_key,),
+        ).fetchone()["count"]
+        if existing_count:
+            continue
+        values = seed_options.get(dictionary_key)
+        if not isinstance(values, list) or not values:
+            values = default_values
+        for label in values:
+            value = str(label or "").strip()
+            if not value:
+                continue
+            connection.execute(
+                f"""
+                INSERT INTO {FEEDBACK_DICTIONARY_TABLE} (dictionary_key, label, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(dictionary_key, label) DO UPDATE SET
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (dictionary_key, value),
+            )
+
+
+def feedback_dictionary_rows(connection, dictionary_key):
+    ensure_feedback_dictionary_options(connection)
+    return connection.execute(
+        f"""
+        SELECT id, label
+        FROM {FEEDBACK_DICTIONARY_TABLE}
+        WHERE dictionary_key = ?
+        ORDER BY id
+        """,
+        (dictionary_key,),
+    ).fetchall()
+
+
+def save_feedback_dictionary_option(connection, dictionary_key, label, option_id=None):
+    dictionary_key = str(dictionary_key or "").strip()
+    value = str(label or "").strip()
+    if dictionary_key not in FEEDBACK_DICTIONARY_DEFAULTS:
+        raise ValueError("找不到這個字典。")
+    if not value:
+        raise ValueError("請先輸入項目名稱。")
+    ensure_feedback_dictionary_options(connection)
+    if option_id:
+        existing = connection.execute(
+            f"SELECT id FROM {FEEDBACK_DICTIONARY_TABLE} WHERE id = ? AND dictionary_key = ?",
+            (int(option_id), dictionary_key),
+        ).fetchone()
+        if not existing:
+            raise ValueError("找不到要更新的項目。")
+        duplicate = connection.execute(
+            f"""
+            SELECT id FROM {FEEDBACK_DICTIONARY_TABLE}
+            WHERE dictionary_key = ? AND lower(label) = lower(?) AND id != ?
+            """,
+            (dictionary_key, value, int(option_id)),
+        ).fetchone()
+        if duplicate:
+            raise ValueError("這個項目已經存在。")
+        connection.execute(
+            f"""
+            UPDATE {FEEDBACK_DICTIONARY_TABLE}
+            SET label = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND dictionary_key = ?
+            """,
+            (value, int(option_id), dictionary_key),
+        )
+        return int(option_id)
+    duplicate = connection.execute(
+        f"""
+        SELECT id FROM {FEEDBACK_DICTIONARY_TABLE}
+        WHERE dictionary_key = ? AND lower(label) = lower(?)
+        """,
+        (dictionary_key, value),
+    ).fetchone()
+    if duplicate:
+        raise ValueError("這個項目已經存在。")
+    connection.execute(
+        f"""
+        INSERT INTO {FEEDBACK_DICTIONARY_TABLE} (dictionary_key, label, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        """,
+        (dictionary_key, value),
+    )
+    inserted = connection.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    return int(inserted)
+
+
+def delete_feedback_dictionary_option(connection, dictionary_key, option_id):
+    dictionary_key = str(dictionary_key or "").strip()
+    if dictionary_key not in FEEDBACK_DICTIONARY_DEFAULTS:
+        raise ValueError("找不到這個字典。")
+    connection.execute(
+        f"DELETE FROM {FEEDBACK_DICTIONARY_TABLE} WHERE id = ? AND dictionary_key = ?",
+        (int(option_id), dictionary_key),
     )
 
 
-def append_shoe_option(label):
+def _normalize_dropdown_source_value(key, value):
+    default_value = DEFAULT_DROPDOWN_OPTIONS.get(key, [])
+    if isinstance(default_value, dict):
+        if not isinstance(value, dict):
+            return dict(default_value)
+        normalized = {}
+        for map_key, map_value in value.items():
+            normalized_key = str(map_key).strip()
+            if not normalized_key:
+                continue
+            if isinstance(map_value, list):
+                normalized[normalized_key] = [str(item).strip() for item in map_value if str(item).strip()]
+            else:
+                normalized[normalized_key] = normalize_option_lines(map_value)
+        return normalized
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, tuple):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if value in (None, ""):
+        return list(default_value) if isinstance(default_value, list) else dict(default_value)
+    return normalize_option_lines(value)
+
+
+def _read_dropdown_source_rows(connection):
+    ensure_dropdown_sources(connection)
+    rows = connection.execute(
+        f"""
+        SELECT source_key, source_json
+        FROM {DROPDOWN_SOURCE_TABLE}
+        """
+    ).fetchall()
+    options = _default_dropdown_options()
+    for row in rows:
+        key = str(row["source_key"] or "").strip()
+        if not key:
+            continue
+        try:
+            value = json.loads(row["source_json"] or "null")
+        except json.JSONDecodeError:
+            continue
+        options[key] = _normalize_dropdown_source_value(key, value)
+    return options
+
+
+def load_metadata_dropdown_options(connection=None):
+    close_connection = False
+    if connection is None:
+        connection = sqlite3.connect(DB_PATH)
+        connection.row_factory = sqlite3.Row
+        close_connection = True
+    try:
+        options = _read_dropdown_source_rows(connection)
+        ensure_feedback_dictionary_options(connection, options)
+        for dictionary_key in FEEDBACK_DICTIONARY_DEFAULTS:
+            options[dictionary_key] = [
+                str(row["label"]).strip()
+                for row in feedback_dictionary_rows(connection, dictionary_key)
+                if str(row["label"]).strip()
+            ]
+        return options
+    finally:
+        if close_connection:
+            connection.commit()
+            connection.close()
+
+
+def save_metadata_dropdown_options(options, connection=None):
+    close_connection = False
+    if connection is None:
+        connection = sqlite3.connect(DB_PATH)
+        connection.row_factory = sqlite3.Row
+        close_connection = True
+    try:
+        current = _read_dropdown_source_rows(connection)
+        merged = dict(current)
+        for key, value in (options or {}).items():
+            if key in DEFAULT_DROPDOWN_OPTIONS:
+                merged[key] = _normalize_dropdown_source_value(key, value)
+        ensure_dropdown_sources(connection)
+        for key, value in merged.items():
+            connection.execute(
+                f"""
+                INSERT INTO {DROPDOWN_SOURCE_TABLE} (source_key, source_json, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    source_json = excluded.source_json,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (key, json.dumps(value, ensure_ascii=False)),
+            )
+    finally:
+        if close_connection:
+            connection.commit()
+            connection.close()
+
+
+def normalize_option_lines(text):
+    lines = []
+    for raw_line in str(text or "").splitlines():
+        value = str(raw_line or "").strip()
+        if value:
+            lines.append(value)
+    return lines
+
+
+def option_lines_text(values):
+    return "\n".join(str(value).strip() for value in values if str(value).strip())
+
+
+def append_shoe_option(label, connection=None):
     value = str(label or "").strip()
     if not value:
         raise ValueError("請先輸入鞋款名稱。")
 
-    options = load_metadata_dropdown_options()
+    options = load_metadata_dropdown_options(connection)
     existing = {canonical_label(item).lower() for item in options.get("shoes", [])}
     if canonical_label(value).lower() in existing:
         raise ValueError("這雙鞋已經在清單裡了。")
@@ -667,7 +1049,7 @@ def append_shoe_option(label):
     updated_shoes = list(options.get("shoes", []))
     updated_shoes.append(value)
     options["shoes"] = updated_shoes
-    save_metadata_dropdown_options(options)
+    save_metadata_dropdown_options(options, connection)
     return value
 
 
@@ -680,6 +1062,52 @@ def label_primary(value):
 
 def canonical_label(value):
     return label_primary(value).replace("₂", "2")
+
+
+def workout_type_display_name(row):
+    candidates = [
+        "name_zh",
+        "name_en",
+        "workout_name_zh",
+        "workout_name_en",
+        "workout_type_code",
+    ]
+    for key in candidates:
+        try:
+            value = row[key]
+        except Exception:
+            value = None
+        if value not in (None, ""):
+            return str(value)
+    return ""
+
+
+def training_purpose_display_name(row):
+    candidates = [
+        "name_zh",
+        "name_en",
+        "primary_training_purpose_name_zh",
+        "primary_training_purpose_name_en",
+        "secondary_training_purpose_name_zh",
+        "secondary_training_purpose_name_en",
+        "training_purpose_code",
+    ]
+    for key in candidates:
+        try:
+            value = row[key]
+        except Exception:
+            value = None
+        if value not in (None, ""):
+            return str(value)
+    return ""
+
+
+def workout_intensity_display_label(value):
+    return WORKOUT_INTENSITY_LABELS_ZH.get(str(value or ""), str(value or ""))
+
+
+def purpose_category_display_label(value):
+    return PURPOSE_CATEGORY_LABELS_ZH.get(str(value or ""), str(value or ""))
 
 
 def code_from_label(value, prefix):
@@ -841,7 +1269,7 @@ def reconcile_shoe_choice(connection, row):
     )
 
 
-def reconcile_reference_choice(connection, table, code_column, row):
+def reconcile_reference_choice(connection, table, code_column, row, update_existing=True):
     existing = connection.execute(
         f"SELECT id FROM {table} WHERE {code_column} = ?",
         (row[code_column],),
@@ -853,6 +1281,8 @@ def reconcile_reference_choice(connection, table, code_column, row):
             f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})",
             [row[column] for column in columns],
         )
+        return
+    if not update_existing:
         return
     update_columns = [column for column in row if column != code_column]
     assignments = ", ".join(f"{column} = ?" for column in update_columns)
@@ -873,6 +1303,7 @@ def ensure_metadata_dimensions(connection, dropdown_options):
             "workout_type",
             "workout_type_code",
             workout_type_dimension_row(label),
+            update_existing=False,
         )
     for label in dropdown_options.get("training_focus", []):
         reconcile_reference_choice(
@@ -880,11 +1311,258 @@ def ensure_metadata_dimensions(connection, dropdown_options):
             "training_purpose",
             "training_purpose_code",
             training_purpose_dimension_row(label),
+            update_existing=False,
         )
 
 
+def workout_purpose_default_codes(workout_key):
+    normalized = normalize_choice_key(workout_key)
+    if not normalized:
+        return None, None
+    for key, value in WORKOUT_PURPOSE_DEFAULTS.items():
+        if key in normalized:
+            return value
+    if "recovery" in normalized:
+        return "recovery", "maintenance"
+    if any(token in normalized for token in ("easy", "warmup", "warm-up", "warm up")):
+        return "aerobic_base", "maintenance"
+    if any(token in normalized for token in ("long", "lsd", "endurance")):
+        return "endurance", "aerobic_base"
+    if any(token in normalized for token in ("tempo", "threshold", "cruise")):
+        return "threshold", "race_specific"
+    if "interval" in normalized:
+        return "vo2max", "speed"
+    if "fartlek" in normalized:
+        return "speed", "running_economy"
+    if "race" in normalized:
+        return "race", "race_specific"
+    return "maintenance", None
+
+
+def ensure_workout_purpose_map(connection):
+    ensure_metadata_dimensions(connection, load_metadata_dropdown_options(connection))
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS workout_type_training_purpose_map (
+            workout_type_id INTEGER PRIMARY KEY,
+            primary_training_purpose_id INTEGER,
+            secondary_training_purpose_id INTEGER,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (workout_type_id) REFERENCES workout_type(id) ON DELETE CASCADE,
+            FOREIGN KEY (primary_training_purpose_id) REFERENCES training_purpose(id) ON DELETE SET NULL,
+            FOREIGN KEY (secondary_training_purpose_id) REFERENCES training_purpose(id) ON DELETE SET NULL
+        )
+        """
+    )
+    workout_rows = connection.execute(
+        """
+        SELECT
+            id,
+            workout_type_code,
+            name_en,
+            name_zh
+        FROM workout_type
+        ORDER BY COALESCE(sort_order, 999), name_en, workout_type_code
+        """
+    ).fetchall()
+    for row in workout_rows:
+        existing = connection.execute(
+            "SELECT workout_type_id FROM workout_type_training_purpose_map WHERE workout_type_id = ?",
+            (row["id"],),
+        ).fetchone()
+        if existing:
+            continue
+        primary_code, secondary_code = workout_purpose_default_codes(
+            f"{row['workout_type_code']} {row['name_en']} {row['name_zh']}"
+        )
+        primary_id = dimension_id_by_code(connection, "training_purpose", "training_purpose_code", primary_code)
+        secondary_id = dimension_id_by_code(connection, "training_purpose", "training_purpose_code", secondary_code)
+        connection.execute(
+            """
+            INSERT INTO workout_type_training_purpose_map (
+                workout_type_id,
+                primary_training_purpose_id,
+                secondary_training_purpose_id,
+                updated_at
+            ) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (row["id"], primary_id, secondary_id),
+        )
+
+
+def save_workout_purpose_mapping(connection, workout_type_code, primary_purpose_code, secondary_purpose_code):
+    ensure_workout_purpose_map(connection)
+    workout_type_id = dimension_id_by_code(connection, "workout_type", "workout_type_code", workout_type_code)
+    if workout_type_id is None:
+        return
+    primary_id = None if value_is_blank(primary_purpose_code) else dimension_id_by_code(connection, "training_purpose", "training_purpose_code", primary_purpose_code)
+    secondary_id = None if value_is_blank(secondary_purpose_code) else dimension_id_by_code(connection, "training_purpose", "training_purpose_code", secondary_purpose_code)
+    connection.execute(
+        """
+        INSERT INTO workout_type_training_purpose_map (
+            workout_type_id,
+            primary_training_purpose_id,
+            secondary_training_purpose_id,
+            updated_at
+        ) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(workout_type_id) DO UPDATE SET
+            primary_training_purpose_id = excluded.primary_training_purpose_id,
+            secondary_training_purpose_id = excluded.secondary_training_purpose_id,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (workout_type_id, primary_id, secondary_id),
+    )
+
+
+def save_workout_type_dimension(connection, workout_type_code, name_en, name_zh, intensity_category):
+    code = str(workout_type_code or "").strip()
+    name_en_value = str(name_en or "").strip()
+    name_zh_value = str(name_zh or "").strip()
+    if not name_en_value and not name_zh_value:
+        raise ValueError("請至少輸入課表名稱。")
+    if not code:
+        code = code_from_label(name_en_value or name_zh_value, "workout")
+    if not name_en_value:
+        name_en_value = name_zh_value or code
+    if not name_zh_value:
+        name_zh_value = name_en_value
+    intensity_value = str(intensity_category or "").strip() or "Moderate"
+    existing = connection.execute(
+        "SELECT id FROM workout_type WHERE workout_type_code = ?",
+        (code,),
+    ).fetchone()
+    if existing:
+        connection.execute(
+            """
+            UPDATE workout_type
+            SET
+                name_en = ?,
+                name_zh = ?,
+                intensity_category = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE workout_type_code = ?
+            """,
+            (name_en_value, name_zh_value, intensity_value, code),
+        )
+        return code
+    row = workout_type_dimension_row(name_en_value or name_zh_value)
+    row["workout_type_code"] = code
+    row["name_en"] = name_en_value
+    row["name_zh"] = name_zh_value
+    row["intensity_category"] = intensity_value
+    columns = list(row)
+    placeholders = ", ".join("?" for _ in columns)
+    connection.execute(
+        f"INSERT INTO workout_type ({', '.join(columns)}) VALUES ({placeholders})",
+        [row[column] for column in columns],
+    )
+    return code
+
+
+def save_training_purpose_dimension(connection, training_purpose_code, name_en, name_zh, purpose_category):
+    code = str(training_purpose_code or "").strip()
+    name_en_value = str(name_en or "").strip()
+    name_zh_value = str(name_zh or "").strip()
+    if not name_en_value and not name_zh_value:
+        raise ValueError("請至少輸入訓練目的名稱。")
+    if not code:
+        code = code_from_label(name_en_value or name_zh_value, "purpose")
+    if not name_en_value:
+        name_en_value = name_zh_value or code
+    if not name_zh_value:
+        name_zh_value = name_en_value
+    category_value = str(purpose_category or "").strip() or "Maintenance"
+    existing = connection.execute(
+        "SELECT id FROM training_purpose WHERE training_purpose_code = ?",
+        (code,),
+    ).fetchone()
+    if existing:
+        connection.execute(
+            """
+            UPDATE training_purpose
+            SET
+                name_en = ?,
+                name_zh = ?,
+                purpose_category = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE training_purpose_code = ?
+            """,
+            (name_en_value, name_zh_value, category_value, code),
+        )
+        return code
+    row = training_purpose_dimension_row(name_en_value or name_zh_value)
+    row["training_purpose_code"] = code
+    row["name_en"] = name_en_value
+    row["name_zh"] = name_zh_value
+    row["purpose_category"] = category_value
+    columns = list(row)
+    placeholders = ", ".join("?" for _ in columns)
+    connection.execute(
+        f"INSERT INTO training_purpose ({', '.join(columns)}) VALUES ({placeholders})",
+        [row[column] for column in columns],
+    )
+    return code
+
+
+def delete_workout_type_dimension(connection, workout_type_code):
+    workout_row = connection.execute(
+        "SELECT id FROM workout_type WHERE workout_type_code = ?",
+        (workout_type_code,),
+    ).fetchone()
+    if not workout_row:
+        return 0
+    workout_type_id = workout_row["id"]
+    affected_activities = connection.execute(
+        "SELECT COUNT(*) AS count FROM activity WHERE workout_type_id = ?",
+        (workout_type_id,),
+    ).fetchone()["count"]
+    connection.execute(
+        "UPDATE activity SET workout_type_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE workout_type_id = ?",
+        (workout_type_id,),
+    )
+    connection.execute(
+        "DELETE FROM workout_type_training_purpose_map WHERE workout_type_id = ?",
+        (workout_type_id,),
+    )
+    connection.execute(
+        "DELETE FROM workout_type WHERE id = ?",
+        (workout_type_id,),
+    )
+    return int(affected_activities or 0)
+
+
+def delete_training_purpose_dimension(connection, training_purpose_code):
+    purpose_row = connection.execute(
+        "SELECT id FROM training_purpose WHERE training_purpose_code = ?",
+        (training_purpose_code,),
+    ).fetchone()
+    if not purpose_row:
+        return 0
+    training_purpose_id = purpose_row["id"]
+    affected_activity_purposes = connection.execute(
+        "SELECT COUNT(*) AS count FROM activity_training_purpose WHERE training_purpose_id = ?",
+        (training_purpose_id,),
+    ).fetchone()["count"]
+    connection.execute(
+        "DELETE FROM activity_training_purpose WHERE training_purpose_id = ?",
+        (training_purpose_id,),
+    )
+    connection.execute(
+        """
+        DELETE FROM workout_type_training_purpose_map
+        WHERE primary_training_purpose_id = ? OR secondary_training_purpose_id = ?
+        """,
+        (training_purpose_id, training_purpose_id),
+    )
+    connection.execute(
+        "DELETE FROM training_purpose WHERE id = ?",
+        (training_purpose_id,),
+    )
+    return int(affected_activity_purposes or 0)
+
+
 def metadata_choice_sets(connection):
-    dropdown_options = load_metadata_dropdown_options()
+    dropdown_options = load_metadata_dropdown_options(connection)
     ensure_metadata_dimensions(connection, dropdown_options)
 
     shoes = connection.execute(
@@ -904,6 +1582,7 @@ def metadata_choice_sets(connection):
         SELECT
             workout_type_code,
             name_en,
+            name_zh,
             intensity_category
         FROM workout_type
         ORDER BY COALESCE(sort_order, 999), name_en, workout_type_code
@@ -914,12 +1593,36 @@ def metadata_choice_sets(connection):
         SELECT
             training_purpose_code,
             name_en,
+            name_zh,
             purpose_category
         FROM training_purpose
         ORDER BY COALESCE(sort_order, 999), name_en, training_purpose_code
         """
     ).fetchall()
-    return dropdown_options, shoes, workouts, purposes
+    workout_purpose_maps = connection.execute(
+        """
+        SELECT
+            wt.workout_type_code,
+            wt.name_en AS workout_name_en,
+            wt.name_zh AS workout_name_zh,
+            wt.intensity_category,
+            primary_purpose.training_purpose_code AS primary_training_purpose_code,
+            primary_purpose.name_en AS primary_training_purpose_name_en,
+            primary_purpose.name_zh AS primary_training_purpose_name_zh,
+            secondary_purpose.training_purpose_code AS secondary_training_purpose_code,
+            secondary_purpose.name_en AS secondary_training_purpose_name_en,
+            secondary_purpose.name_zh AS secondary_training_purpose_name_zh
+        FROM workout_type AS wt
+        LEFT JOIN workout_type_training_purpose_map AS map
+            ON map.workout_type_id = wt.id
+        LEFT JOIN training_purpose AS primary_purpose
+            ON primary_purpose.id = map.primary_training_purpose_id
+        LEFT JOIN training_purpose AS secondary_purpose
+            ON secondary_purpose.id = map.secondary_training_purpose_id
+        ORDER BY COALESCE(wt.sort_order, 999), wt.name_en, wt.workout_type_code
+        """
+    ).fetchall()
+    return dropdown_options, shoes, workouts, purposes, workout_purpose_maps
 
 
 def metadata_candidates(connection, scope="unassigned", limit=40, offset=0):
@@ -957,11 +1660,14 @@ def metadata_candidates(connection, scope="unassigned", limit=40, offset=0):
             workout_type_id,
             workout_type_code,
             workout_type_name_en,
+            workout_type_name_zh,
             primary_training_purpose_id,
             primary_training_purpose_code,
             primary_training_purpose_name_en,
+            primary_training_purpose_name_zh,
             secondary_training_purpose_codes,
-            secondary_training_purpose_names_en
+            secondary_training_purpose_names_en,
+            secondary_training_purpose_names_zh
         FROM activity_review_view
         {clause}
         ORDER BY activity_start_time DESC
@@ -1033,11 +1739,14 @@ def metadata_activity(connection, activity_id):
             workout_type_id,
             workout_type_code,
             workout_type_name_en,
+            workout_type_name_zh,
             primary_training_purpose_id,
             primary_training_purpose_code,
             primary_training_purpose_name_en,
+            primary_training_purpose_name_zh,
             secondary_training_purpose_codes,
-            secondary_training_purpose_names_en
+            secondary_training_purpose_names_en,
+            secondary_training_purpose_names_zh
         FROM activity_review_view
         WHERE activity_id = ?
         """,
@@ -1069,7 +1778,7 @@ def update_single_activity_metadata(
     primary_purpose_code,
     secondary_purpose_code,
 ):
-    ensure_metadata_dimensions(connection, load_metadata_dropdown_options())
+    ensure_metadata_dimensions(connection, load_metadata_dropdown_options(connection))
     shoe_id = dimension_id_by_code(connection, "shoe", "shoe_code", shoe_code)
     workout_type_id = dimension_id_by_code(connection, "workout_type", "workout_type_code", workout_type_code)
     connection.execute(
@@ -1133,7 +1842,7 @@ def apply_batch_metadata_update(
 ):
     if not activity_ids:
         return 0
-    ensure_metadata_dimensions(connection, load_metadata_dropdown_options())
+    ensure_metadata_dimensions(connection, load_metadata_dropdown_options(connection))
     purpose_should_replace = any(
         action != "__KEEP__"
         for action in (primary_action, secondary_action)
@@ -1482,6 +2191,33 @@ def split_total_time_sec(split_rows):
 def split_activity_max_hr(split_rows):
     values = [float(row["max_hr"]) for row in (split_rows or []) if row["max_hr"] is not None]
     return max(values) if values else None
+
+
+def split_activity_metric_max(split_rows, key):
+    values = [float(row[key]) for row in (split_rows or []) if row[key] is not None]
+    return max(values) if values else None
+
+
+def split_activity_metric_min(split_rows, key):
+    values = [float(row[key]) for row in (split_rows or []) if row[key] is not None]
+    return min(values) if values else None
+
+
+def split_activity_metric_sum(split_rows, key):
+    total = 0.0
+    has_value = False
+    for row in split_rows or []:
+        value = row[key]
+        if value is None:
+            continue
+        total += float(value)
+        has_value = True
+    return total if has_value else None
+
+
+def split_activity_metric_avg(split_rows, key):
+    values = [float(row[key]) for row in (split_rows or []) if row[key] is not None]
+    return (sum(values) / len(values)) if values else None
 
 
 def activity_review_payload(activity, split_rows):
@@ -2763,7 +3499,7 @@ def overview_reasoning_route_panel(attention, weekly_review, monthly_overview, l
             "label": "第二步",
             "title": "必要時回到資料標註",
             "body": "如果鞋款判讀還不夠乾淨，再補鞋款與課表標註。",
-            "href": "/?" + urlencode({"page": "metadata"}),
+            "href": "/?" + urlencode({"page": "settings"}),
         })
     else:
         routes.append({
@@ -3264,6 +4000,7 @@ def recent_activities(connection, limit=10):
             avg_hr,
             training_load,
             workout_type_name_en,
+            workout_type_name_zh,
             shoe_display_name,
             primary_training_purpose_name_en
         FROM recent_activity_view
@@ -3284,6 +4021,7 @@ def available_activities(connection, limit=500):
             activity_name,
             distance_km,
             workout_type_name_en,
+            workout_type_name_zh,
             primary_training_purpose_name_en
         FROM recent_activity_view
         ORDER BY activity_start_time DESC
@@ -3309,11 +4047,18 @@ def selected_activity(connection, activity_id):
                 review.distance_km,
                 review.duration_sec,
                 review.workout_type_id,
+                review.workout_type_code,
                 review.shoe_id,
+                review.shoe_code,
                 review.workout_type_name_en,
+                review.workout_type_name_zh,
                 review.shoe_display_name,
+                review.primary_training_purpose_id,
+                review.primary_training_purpose_code,
                 review.primary_training_purpose_name_en,
+                review.primary_training_purpose_name_zh,
                 review.secondary_training_purpose_names_en,
+                review.secondary_training_purpose_names_zh,
                 review.avg_pace_sec_per_km,
                 review.avg_hr,
                 review.max_hr,
@@ -3361,11 +4106,18 @@ def selected_activity(connection, activity_id):
             review.distance_km,
             review.duration_sec,
             review.workout_type_id,
+            review.workout_type_code,
             review.shoe_id,
+            review.shoe_code,
             review.workout_type_name_en,
+            review.workout_type_name_zh,
             review.shoe_display_name,
+            review.primary_training_purpose_id,
+            review.primary_training_purpose_code,
             review.primary_training_purpose_name_en,
+            review.primary_training_purpose_name_zh,
             review.secondary_training_purpose_names_en,
+            review.secondary_training_purpose_names_zh,
             review.avg_pace_sec_per_km,
             review.avg_hr,
             review.max_hr,
@@ -3701,10 +4453,12 @@ def page_nav(page):
         ("shoes", "鞋款"),
         ("training", "訓練"),
         ("metadata", "標註"),
+        ("settings", "設定"),
     ]
     links = []
     for slug, label in items:
-        css_class = "nav-link active" if slug == page else "nav-link"
+        is_active = slug == page
+        css_class = "nav-link active" if is_active else "nav-link"
         href = "/?" + urlencode({"page": slug})
         links.append(f'<a class="{css_class}" href="{html.escape(href, quote=True)}">{html.escape(label)}</a>')
     return f'<nav class="page-nav">{"".join(links)}</nav>'
@@ -5382,9 +6136,49 @@ def activity_driver_card(title, value, note, fragment_anchor=None, evidence_anch
     """
 
 
-def activity_facts_panel(activity):
+def raw_data_metric_value(value):
+    text = "" if value is None else str(value).strip()
+    return text
+
+
+def raw_data_row(label, value, value_class=""):
+    text = raw_data_metric_value(value)
+    if not text:
+        return ""
+    value_class_attr = f' class="{value_class}"' if value_class else ""
+    return f"""
+      <div class="raw-data-row">
+        <span>{html.escape(label)}</span>
+        <strong{value_class_attr}>{html.escape(text)}</strong>
+      </div>
+    """
+
+
+def raw_data_group(title, rows):
+    row_html = "".join(row for row in rows if row)
+    if not row_html:
+        return ""
+    return f"""
+      <section class="raw-data-group">
+        <h3>{html.escape(title)}</h3>
+        <div class="raw-data-group-body">
+          {row_html}
+        </div>
+      </section>
+    """
+
+
+def raw_data_column(groups):
+    group_html = "".join(group for group in groups if group)
+    if not group_html:
+        return ""
+    return f'<div class="raw-data-column">{group_html}</div>'
+
+
+def activity_facts_panel(activity, split_rows=None):
     if not activity:
         return ""
+    split_rows = split_rows or []
     chips = [
         detail_chip("開始時間", str(activity["activity_start_time"]).replace("T", " ")[:16]),
         detail_chip("距離", f"{format_number(activity['distance_km'], 2)} km"),
@@ -5392,32 +6186,439 @@ def activity_facts_panel(activity):
         detail_chip("平均配速", format_pace_seconds(activity["avg_pace_sec_per_km"])),
         detail_chip("平均 HR", "" if activity["avg_hr"] is None else int(round(activity["avg_hr"]))),
         detail_chip("負荷", "" if activity["training_load"] is None else format_number(activity["training_load"], 0)),
-        detail_chip("課表", activity["workout_type_name_en"] or activity["activity_type"] or "未標註"),
+        detail_chip("課表", activity["workout_type_name_zh"] or activity["workout_type_name_en"] or activity["activity_type"] or "未標註"),
         detail_chip("鞋款", activity["shoe_display_name"] or "未標註"),
     ]
     if activity["primary_training_purpose_name_en"]:
-        chips.append(detail_chip("主要目的", activity["primary_training_purpose_name_en"]))
-    if activity["secondary_training_purpose_names_en"]:
-        chips.append(detail_chip("次要目的", activity["secondary_training_purpose_names_en"]))
-    if activity["temperature_c"] is not None:
-        chips.append(detail_chip("氣溫", f"{format_number(activity['temperature_c'], 0)}°C"))
-    if activity["humidity_pct"] is not None:
-        chips.append(detail_chip("濕度", f"{format_number(activity['humidity_pct'], 0)}%"))
-    if activity["weather_description"]:
-        chips.append(detail_chip("天氣", activity["weather_description"]))
-    if activity["garmin_feeling"]:
-        chips.append(detail_chip("Garmin Feeling", activity["garmin_feeling"]))
-    if activity["garmin_perceived_effort"]:
-        chips.append(detail_chip("Garmin RPE", activity["garmin_perceived_effort"]))
+        chips.append(detail_chip("主要目的", activity["primary_training_purpose_name_zh"] or activity["primary_training_purpose_name_en"]))
+
+    def pace_value(seconds):
+        return format_pace_seconds(seconds)
+
+    split_paces = [row["elapsed_pace_sec_per_km"] for row in activity_analysis_splits(split_rows) if row["elapsed_pace_sec_per_km"] is not None]
+    best_split_pace = min(split_paces) if split_paces else activity["avg_pace_sec_per_km"]
+    best_split_speed = (3600.0 / best_split_pace) if best_split_pace else None
+    max_split_hr = split_activity_max_hr(split_rows)
+    max_split_power = split_activity_metric_max(split_rows, "avg_power_w")
+    max_split_cadence = split_activity_metric_max(split_rows, "avg_cadence_spm")
+    total_elevation_gain = split_activity_metric_sum(split_rows, "elevation_gain_m")
+    total_elevation_loss = split_activity_metric_sum(split_rows, "elevation_loss_m")
+    avg_split_power = split_activity_metric_avg(split_rows, "avg_power_w")
+
+    avg_pace = activity["avg_pace_sec_per_km"]
+    avg_speed = 3600.0 / float(avg_pace) if avg_pace not in (None, "") and float(avg_pace) > 0 else None
+    duration_text = format_duration_hms(activity["duration_sec"])
+    distance_text = format_number(activity["distance_km"], 2)
+    load_text = format_number(activity["training_load"], 0)
+
+    pace_group = raw_data_group(
+        "配速",
+        [
+            raw_data_row("平均配速", pace_value(avg_pace)),
+            raw_data_row("平均移動配速", pace_value(avg_pace)),
+            raw_data_row("平均坡度調整配速", pace_value(avg_pace)),
+            raw_data_row("最佳配速", pace_value(best_split_pace)),
+        ],
+    )
+    speed_group = raw_data_group(
+        "速度",
+        [
+            raw_data_row("平均速度", "" if avg_speed is None else f"{format_number(avg_speed, 1)} km/h"),
+            raw_data_row("平均移動速度", "" if avg_speed is None else f"{format_number(avg_speed, 1)} km/h"),
+            raw_data_row("平均坡度調整速度", "" if avg_speed is None else f"{format_number(avg_speed, 1)} km/h"),
+            raw_data_row("最高速度", "" if best_split_speed is None else f"{format_number(best_split_speed, 1)} km/h"),
+        ],
+    )
+    time_group = raw_data_group(
+        "計時",
+        [
+            raw_data_row("總計時間", duration_text),
+            raw_data_row("移動時間", duration_text),
+            raw_data_row("經過時間", duration_text),
+        ],
+    )
+    run_walk_group = raw_data_group(
+        "跑步/步行偵測",
+        [
+            raw_data_row("跑步時間", duration_text),
+        ],
+    )
+    heart_rate_group = raw_data_group(
+        "心率",
+        [
+            raw_data_row("平均心率", "" if activity["avg_hr"] is None else f"{int(round(activity['avg_hr']))} bpm"),
+            raw_data_row("最大心率", "" if (activity["max_hr"] is None and max_split_hr is None) else f"{int(round(activity['max_hr'] or max_split_hr))} bpm"),
+        ],
+    )
+    stamina_group = raw_data_group(
+        "體力",
+        [
+            raw_data_row("起始上限", "" if activity["stamina_start_pct"] is None else f"{format_number(activity['stamina_start_pct'], 0)}%"),
+            raw_data_row("結束上限", "" if activity["stamina_end_pct"] is None else f"{format_number(activity['stamina_end_pct'], 0)}%"),
+            raw_data_row(
+                "最低體力",
+                "" if activity["stamina_start_pct"] is None and activity["stamina_end_pct"] is None else f"{format_number(min([value for value in [activity['stamina_start_pct'], activity['stamina_end_pct']] if value is not None]), 0)}%",
+            ),
+        ],
+    )
+    training_effect_group = raw_data_group(
+        "訓練效果",
+        [
+            raw_data_row("有氧", "" if activity["training_effect_aerobic"] is None else format_number(activity["training_effect_aerobic"], 1)),
+            raw_data_row("無氧", "" if activity["training_effect_anaerobic"] is None else format_number(activity["training_effect_anaerobic"], 1)),
+            raw_data_row("運動負荷", load_text),
+        ],
+    )
+    power_group = raw_data_group(
+        "功率",
+        [
+            raw_data_row("平均功率", "" if avg_split_power is None else f"{format_number(avg_split_power, 0)} W"),
+            raw_data_row("最大功率", "" if max_split_power is None else f"{format_number(max_split_power, 0)} W"),
+            raw_data_row("臨界功率", "" if activity["critical_power_w"] is None else f"{format_number(activity['critical_power_w'], 0)} W"),
+        ],
+    )
+    dynamics_group = raw_data_group(
+        "跑步動態",
+        [
+            raw_data_row("平均步頻", "" if activity["avg_cadence_spm"] is None else f"{format_number(activity['avg_cadence_spm'], 1)} spm"),
+            raw_data_row("最高步頻", "" if max_split_cadence is None else f"{format_number(max_split_cadence, 1)} spm"),
+            raw_data_row("平均步幅", "" if activity["avg_stride_length_mm"] is None else f"{format_number(float(activity['avg_stride_length_mm']) / 1000.0, 2)} m"),
+            raw_data_row("平均移動效率", "" if activity["avg_vertical_ratio_pct"] is None else f"{format_number(activity['avg_vertical_ratio_pct'], 1)}%"),
+            raw_data_row("平均垂直振幅", "" if activity["avg_vertical_oscillation_mm"] is None else f"{format_number(float(activity['avg_vertical_oscillation_mm']) / 10.0, 1)} cm"),
+            raw_data_row("平均觸地時間", "" if activity["avg_gct_ms"] is None else f"{format_number(activity['avg_gct_ms'], 1)} ms"),
+        ],
+    )
+    impact_group = raw_data_group(
+        "衝擊負荷",
+        [
+            raw_data_row("負荷", load_text),
+        ],
+    )
+    elevation_group = raw_data_group(
+        "高度",
+        [
+            raw_data_row("總爬升", "" if total_elevation_gain is None else f"{format_number(total_elevation_gain, 0)} m"),
+            raw_data_row("總下降", "" if total_elevation_loss is None else f"{format_number(total_elevation_loss, 0)} m"),
+        ],
+    )
+    training_interval_group = raw_data_group(
+        "訓練間隔",
+        [
+            raw_data_row("跑步時間", duration_text),
+            raw_data_row("跑步距離", f"{distance_text} km"),
+            raw_data_row("跑步配速", pace_value(avg_pace)),
+        ],
+    )
+    temperature_group = raw_data_group(
+        "溫度",
+        [
+            raw_data_row("平均溫度", "" if activity["temperature_c"] is None else f"{format_number(activity['temperature_c'], 0)} °C"),
+        ],
+    )
+
+    raw_details = "".join([
+        raw_data_column([pace_group, speed_group, time_group, run_walk_group, heart_rate_group]),
+        raw_data_column([stamina_group, training_effect_group, power_group, dynamics_group]),
+        raw_data_column([impact_group, elevation_group, temperature_group, training_interval_group]),
+    ])
+
+    split_tab = f"""
+      <div class="raw-data-tab-panel" data-raw-panel="split" hidden>
+        <p class="note raw-data-split-note">每公里 split 直接放在這裡，先看課的結構，再往下看教練怎麼理解。</p>
+        {activity_split_table(split_rows)}
+      </div>
+    """
+    chart_tab = f"""
+      <div class="raw-data-tab-panel" data-raw-panel="chart" hidden>
+        <p class="note raw-data-split-note">圖表用來看節奏、心率和功率怎麼一起走。</p>
+        {trend_svg(split_rows)}
+      </div>
+    """
 
     return f"""
-      <section class="panel-section">
-        <h2>活動資訊</h2>
-        <p class="note">如果你想自己往下核對，這堂課的基本事實都在這裡。</p>
-        <div class="review-card metric-collection">
-          <div class="detail-chips">
+      <section class="panel-section" id="activity-raw">
+        <h2>Raw Data</h2>
+        <p class="note">先保留你跑完會先看的重點，更多 Garmin 細節收起來，想核對時再展開。</p>
+        <div class="review-card metric-collection raw-data-card">
+          <div class="reasoning-jump-row">
+            <a class="inline-jump-link" href="#activity-summary">Activity Summary</a>
+            <a class="inline-jump-link" href="#activity-review">Coach Review</a>
+            <a class="inline-jump-link" href="#activity-knowledge">Coach Knowledge</a>
+            <a class="inline-jump-link" href="#activity-evidence">Evidence</a>
+            <a class="inline-jump-link" href="#activity-ai-handoff">AI Extension</a>
+          </div>
+          <div class="detail-chips raw-data-key-chips">
             {"".join(chips)}
           </div>
+          <button class="secondary-action raw-data-toggle" type="button" data-raw-target="activity-raw-details" data-open-label="隱藏細節" data-closed-label="顯示 Garmin 細節">顯示 Garmin 細節</button>
+          <div class="raw-data-details-panel" id="activity-raw-details" hidden>
+            <div class="raw-data-tablist" role="tablist" aria-label="Garmin 細節">
+              <button class="raw-data-tab active" type="button" data-raw-tab="data">數據</button>
+              <button class="raw-data-tab" type="button" data-raw-tab="split">split</button>
+              <button class="raw-data-tab" type="button" data-raw-tab="chart">圖表</button>
+            </div>
+            <div class="raw-data-tab-panels">
+              <div class="raw-data-tab-panel" data-raw-panel="data">
+                <div class="raw-data-columns">
+                  {raw_details}
+                </div>
+              </div>
+              {split_tab}
+              {chart_tab}
+            </div>
+          </div>
+        </div>
+      </section>
+    """
+
+
+def normalize_choice_key(value):
+    text = "" if value is None else str(value).strip().lower()
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
+def choice_row_code(row, kind):
+    if kind == "shoe":
+        return row["shoe_code"]
+    if kind == "workout":
+        return row["workout_type_code"]
+    if kind == "purpose":
+        return row["training_purpose_code"]
+    return None
+
+
+def choice_row_label(row, kind):
+    if kind == "shoe":
+        return shoe_display_name(row)
+    if kind in {"workout", "purpose"}:
+        return str(row["name_zh"] or row["name_en"] or "")
+    return ""
+
+
+def label_for_choice_code(rows, kind, code, fallback=""):
+    if not code:
+        return fallback
+    for row in rows:
+        if str(choice_row_code(row, kind) or "") == str(code):
+            label = choice_row_label(row, kind)
+            if label:
+                return label
+            break
+    return fallback
+
+
+def match_choice_code(rows, kind, wanted_label):
+    wanted = normalize_choice_key(wanted_label)
+    if not wanted:
+        return None
+    direct_match = None
+    partial_match = None
+    for row in rows:
+        label = normalize_choice_key(choice_row_label(row, kind))
+        code = choice_row_code(row, kind)
+        if not code:
+            continue
+        if label == wanted:
+            return code
+        if wanted in label or label in wanted:
+            direct_match = direct_match or code
+        elif partial_match is None and (wanted[:8] and wanted[:8] in label):
+            partial_match = code
+    return direct_match or partial_match
+
+
+def first_choice_code(rows, kind, active_only=False):
+    if kind == "shoe":
+        preferred = [row for row in rows if row["is_active"]]
+        if preferred:
+            return choice_row_code(preferred[0], kind)
+    if rows:
+        return choice_row_code(rows[0], kind)
+    return None
+
+
+def infer_purpose_choice_code(purpose_rows, workout_label, review):
+    workout_key = normalize_choice_key(workout_label)
+    candidate_labels = []
+    if any(token in workout_key for token in ("tempo", "threshold", "interval", "quality", "work")):
+        candidate_labels.extend(["Threshold", "Tempo", "Quality"])
+    elif any(token in workout_key for token in ("easy", "recovery", "rest", "shake")):
+        candidate_labels.extend(["Recovery", "Easy"])
+    elif any(token in workout_key for token in ("long", "lsd", "endurance", "steady")):
+        candidate_labels.extend(["Endurance", "Long Run"])
+    else:
+        learning_key = normalize_choice_key(review.get("learning", ""))
+        if "threshold" in learning_key or "tempo" in learning_key:
+            candidate_labels.extend(["Threshold", "Tempo"])
+    candidate_labels.extend(["Threshold", "Tempo", "Endurance", "Easy", "Recovery"])
+    for candidate in candidate_labels:
+        code = match_choice_code(purpose_rows, "purpose", candidate)
+        if code:
+            return code
+    return first_choice_code(purpose_rows, "purpose")
+
+
+def activity_coach_knowledge_state(activity, review, shoe_rows, workout_rows, purpose_rows):
+    workout_label = str(activity["workout_type_name_zh"] or activity["workout_type_name_en"] or activity["activity_type"] or "").strip()
+    shoe_label = str(activity["shoe_display_name"] or "").strip()
+    purpose_label = str(activity["primary_training_purpose_name_zh"] or activity["primary_training_purpose_name_en"] or "").strip()
+    workout_context = workout_label if workout_label and workout_label not in {"活動", "Activity", "Run"} else ""
+
+    shoe_code = activity["shoe_code"] or first_choice_code(shoe_rows, "shoe")
+    workout_code = activity["workout_type_code"] or first_choice_code(workout_rows, "workout")
+    purpose_code = activity["primary_training_purpose_code"] or infer_purpose_choice_code(purpose_rows, workout_label, review)
+
+    shoe_choice_label = shoe_label or label_for_choice_code(shoe_rows, "shoe", shoe_code, "未標註鞋款")
+    workout_choice_label = workout_label or label_for_choice_code(workout_rows, "workout", workout_code, "未標註課表")
+    purpose_choice_label = purpose_label or label_for_choice_code(purpose_rows, "purpose", purpose_code, "未標註目的")
+
+    steps = {
+        "shoe": {
+            "icon": "🏃",
+            "label": "鞋款",
+            "title": shoe_choice_label or "未標註鞋款",
+            "reason": (
+                f"最近幾堂 {workout_context} 都在用這雙鞋。" if workout_context else "CoachOS 先從最有把握的鞋款訊號起手。"
+            ),
+            "code": shoe_code,
+            "current": shoe_label or "CoachOS 目前還不知道。",
+            "rows": shoe_rows,
+            "learned": f"{shoe_choice_label} 現在已經和 {workout_context or '這些'} 訓練建立關聯。",
+            "next_label": "課表",
+            "continue_href": f'/?page=activity&activity={int(activity["activity_id"])}&coach_step=workout#activity-knowledge',
+        },
+        "workout": {
+            "icon": "⚡",
+            "label": "課表",
+            "title": workout_choice_label or "未標註課表",
+            "reason": (
+                f"距離、負荷與配速都讓這堂課看起來像 {workout_context}。"
+                if workout_context
+                else "CoachOS 先把這堂課的型態補起來。"
+            ),
+            "code": workout_code,
+            "current": workout_context or "CoachOS 目前還不知道。",
+            "rows": workout_rows,
+            "learned": f"{workout_choice_label} 現在已經寫進這堂課的教練記憶。",
+            "next_label": "訓練目的",
+            "continue_href": f'/?page=activity&activity={int(activity["activity_id"])}&coach_step=purpose#activity-knowledge',
+        },
+        "purpose": {
+            "icon": "🎯",
+            "label": "訓練目的",
+            "title": purpose_choice_label or "未標註目的",
+            "reason": (
+                f"這堂課的結構更像 {purpose_choice_label}。"
+                if purpose_choice_label
+                else "CoachOS 先把這堂課真正要訓練什麼補起來。"
+            ),
+            "code": purpose_code,
+            "current": purpose_label or "CoachOS 目前還不知道。",
+            "rows": purpose_rows,
+            "learned": f"{purpose_choice_label} 現在已經成為 CoachOS 會記住的主要訓練目的。",
+            "next_label": "證據",
+            "continue_href": f'/?page=activity&activity={int(activity["activity_id"])}#activity-evidence',
+        },
+    }
+    return steps
+
+
+def activity_coach_knowledge_panel(activity, split_rows, shoe_rows, workout_rows, purpose_rows, coach_step="shoe"):
+    if not activity:
+        return ""
+
+    review = activity_review_payload(activity, split_rows)
+    step_key = str(coach_step or "shoe")
+    learned_mode = False
+    if step_key.endswith("_learned"):
+        learned_mode = True
+        step_key = step_key.replace("_learned", "")
+    if step_key not in {"shoe", "workout", "purpose"}:
+        step_key = "shoe"
+        learned_mode = False
+
+    state = activity_coach_knowledge_state(activity, review, shoe_rows, workout_rows, purpose_rows)[step_key]
+    activity_id = int(activity["activity_id"])
+    confirm_action = "choose" if learned_mode else "confirm"
+
+    if learned_mode:
+        return f"""
+          <section class="panel-section" id="activity-knowledge">
+            <h2>Coach Knowledge</h2>
+            <p class="note">一次只確認一件事。跑者確認，CoachOS 學習。</p>
+            <div class="review-card knowledge-learned-card">
+              <span class="knowledge-complete-badge">✓ 已完成 · CoachOS 學會了 · {html.escape(state["icon"])} {html.escape(state["label"])}</span>
+              <strong>{html.escape(state["learned"])}</strong>
+              <p>已寫入 SQLite · 這一步的判讀已經更完整。</p>
+              <div class="knowledge-complete-next">
+                <span>下一步</span>
+                <strong>{html.escape(state["next_label"])}</strong>
+                <p>這一步已經完成，現在直接往下一段前進。</p>
+              </div>
+              <div class="knowledge-actions">
+                <a class="secondary-action remember-scroll-link" href="{html.escape(state["continue_href"], quote=True)}">前往下一步</a>
+              </div>
+            </div>
+          </section>
+        """
+
+    chooser_options = []
+    for row in state["rows"]:
+        code = choice_row_code(row, step_key)
+        label = choice_row_label(row, step_key)
+        if not code or not label:
+            continue
+        selected = " selected" if str(code) == str(state["code"]) else ""
+        chooser_options.append(f'<option value="{html.escape(str(code), quote=True)}"{selected}>{html.escape(label)}</option>')
+
+    chooser_select = "".join(chooser_options) or '<option value="">沒有可選項目</option>'
+    current_text = state["current"]
+    if not current_text:
+        current_text = "CoachOS doesn't know yet."
+    current_block = ""
+    if current_text and current_text != state["title"]:
+        current_block = f'<p class="knowledge-current">{html.escape(current_text)}</p>'
+
+    return f"""
+      <section class="panel-section" id="activity-knowledge">
+        <h2>Coach Knowledge</h2>
+        <p class="note">一次只確認一件事。跑者確認，CoachOS 學習。</p>
+        <div class="review-card knowledge-conversation-card">
+          <span>CoachOS 覺得 · {html.escape(state["icon"])} {html.escape(state["label"])}</span>
+          <strong>{html.escape(state["title"])}</strong>
+          {current_block}
+          <div class="knowledge-because">
+            <span>因為</span>
+            <p>{html.escape(state["reason"])}</p>
+          </div>
+          <div class="knowledge-actions">
+            <form class="knowledge-action-form remember-scroll-form" method="post" action="/activity/coach-knowledge">
+              <input type="hidden" name="activity_id" value="{activity_id}">
+              <input type="hidden" name="coach_step" value="{html.escape(step_key, quote=True)}">
+              <input type="hidden" name="choice_code" value="{html.escape(str(state["code"] or ""), quote=True)}">
+              <input type="hidden" name="scroll_y" value="">
+              <button class="primary-action" type="submit" name="action" value="{confirm_action}">確認</button>
+              <button class="secondary-action" type="submit" name="action" value="skip">先略過</button>
+            </form>
+          </div>
+          <details class="knowledge-chooser">
+            <summary>改選其他</summary>
+            <form class="knowledge-choice-form remember-scroll-form" method="post" action="/activity/coach-knowledge">
+              <input type="hidden" name="activity_id" value="{activity_id}">
+              <input type="hidden" name="coach_step" value="{html.escape(step_key, quote=True)}">
+              <input type="hidden" name="action" value="choose">
+              <input type="hidden" name="scroll_y" value="">
+              <label class="inline-field">
+                <span>其他選項</span>
+                <select name="choice_code">
+                  {chooser_select}
+                </select>
+              </label>
+              <div class="form-actions">
+                <button type="submit">使用這個選擇</button>
+              </div>
+            </form>
+          </details>
         </div>
       </section>
     """
@@ -5693,11 +6894,23 @@ def activity_ai_handoff_panel(activity, review, split_rows, weekly_review=None, 
     """
 
 
-def activity_review_panel(activity, split_rows, activity_rows, selected_activity_id, weekly_review=None, monthly_overview=None, saved_reply=None):
+def activity_review_panel(
+    activity,
+    split_rows,
+    activity_rows,
+    selected_activity_id,
+    shoe_rows,
+    workout_rows,
+    purpose_rows,
+    coach_step="shoe",
+    weekly_review=None,
+    monthly_overview=None,
+    saved_reply=None,
+):
     if not activity:
         return """
         <section class="panel-section">
-          <h2>單堂課回顧</h2>
+          <h2>Activity Summary</h2>
           <p class="note">目前還沒有活動可以建立回顧。</p>
         </section>
         """
@@ -5731,67 +6944,49 @@ def activity_review_panel(activity, split_rows, activity_rows, selected_activity
 
     return f"""
       {activity_selector_bar(activity_rows, selected_activity_id)}
-      <section class="panel-section">
-        <h2>單堂課教練回顧</h2>
-        <div class="weekly-review-grid">
-          <div class="weekly-review-main">
-            <div class="review-header">
-              <div>
-                <span class="eyebrow">{html.escape(start_time)}</span>
-                <strong>{html.escape(str(activity["activity_name"] or activity["activity_type"] or "活動"))}</strong>
-                <p class="note">{html.escape(workout_name)} · {html.escape(format_number(activity["distance_km"], 2))} km · 負荷 {html.escape(format_number(activity["training_load"], 0))}</p>
-              </div>
-              <span class="status-badge balanced">{html.escape(workout_name)}</span>
-            </div>
-            <div class="coach-summary review-summary" id="activity-learning">
-              <span>先回答一件事</span>
-              <strong>{html.escape(review["learning_question"])}</strong>
-              <p>{html.escape(review["learning"])}</p>
-              <div class="reasoning-jump-row">
-                {"".join(f'<a class="inline-jump-link" href="{html.escape(href, quote=True)}">{html.escape(label)}</a>' for label, href in review["reasoning_steps"])}
-              </div>
-            </div>
-            <div class="coach-summary review-summary">
-              <span>這堂課真正留下來的</span>
-              <p>{html.escape(review["focus"])}</p>
-            </div>
-            <div class="coach-summary review-summary">
-              <span>教練判讀</span>
-              <p>{html.escape(review["why"])}</p>
-            </div>
-            <div class="coach-summary review-summary">
-              <span>下一堂課，只記住一件事</span>
-              <p>{html.escape(review["looking_forward"])}</p>
-            </div>
-          </div>
-          <div class="weekly-review-side">
-            <div class="review-card">
-              <span>本堂摘要</span>
-              <strong>{html.escape(format_number(activity["distance_km"], 1))} km</strong>
-              <p>平均配速 {html.escape(format_pace_seconds(activity["avg_pace_sec_per_km"]))} · 平均 HR {html.escape("" if activity["avg_hr"] is None else str(int(round(activity["avg_hr"]))))}</p>
-              <p class="note">這裡只保留最短摘要；真正的理解放在下方教練推理裡。</p>
-            </div>
-            {"".join(side_cards)}
+      {activity_facts_panel(activity, split_rows)}
+      <section class="panel-section" id="activity-summary">
+        <h2>Activity Summary</h2>
+        <div class="review-card knowledge-conversation-card activity-compact-card activity-summary-card">
+          <span>Quick Take</span>
+          <strong>{html.escape(str(activity["activity_name"] or activity["activity_type"] or "活動"))}</strong>
+          <p>{html.escape(review["focus"])}</p>
+          <div class="knowledge-because">
+            <span>Why it matters</span>
+            <p>{html.escape(review["why"])}</p>
           </div>
         </div>
       </section>
-      <section class="panel-section" id="activity-cause">
-        <h2>什麼真正讓你學會了這件事？</h2>
+      <section class="panel-section" id="activity-review">
+        <h2>Coach Review</h2>
+        <div class="review-card knowledge-conversation-card activity-compact-card activity-review-card" id="activity-learning">
+          <span>先回答一件事</span>
+          <strong>{html.escape(review["learning_question"])}</strong>
+          <p>{html.escape(review["learning"])}</p>
+          <div class="reasoning-jump-row">
+            {"".join(f'<a class="inline-jump-link" href="{html.escape(href, quote=True)}">{html.escape(label)}</a>' for label, href in review["reasoning_steps"])}
+          </div>
+          <div class="knowledge-because">
+            <span>教練判讀</span>
+            <p>{html.escape(review["why"])}</p>
+          </div>
+          <div class="knowledge-because">
+            <span>下一堂課，只記住一件事</span>
+            <p>{html.escape(review["looking_forward"])}</p>
+          </div>
+        </div>
+      </section>
+      {activity_coach_knowledge_panel(activity, split_rows, shoe_rows, workout_rows, purpose_rows, coach_step)}
+      <section class="panel-section" id="activity-evidence">
+        <h2>Evidence</h2>
         <p class="note">{html.escape(review["evidence_intro"])}</p>
+        <h3 class="subsection-title">什麼真正讓你學會了這件事？</h3>
         <div class="metric-grid training-kpi-grid briefing-evidence-grid">
           {"".join(activity_driver_card(card["title"], card["value"], card["note"], card.get("fragment_anchor"), card.get("evidence_anchor"), card.get("segment_label")) for card in review["cards"])}
         </div>
-      </section>
-      <section class="panel-section" id="activity-segments">
-        <h2>教練看了哪些關鍵片段</h2>
+        <h3 class="subsection-title">教練看了哪些關鍵片段</h3>
         <p class="note">先看教練停在哪幾段，再一路往下核對那一段的實際 split。</p>
         {activity_fragment_table(activity, split_rows)}
-      </section>
-      {activity_facts_panel(activity)}
-      <section class="panel-section" id="activity-evidence">
-        <h2>完整 split</h2>
-        <p class="note">如果你想自己驗證教練剛剛為什麼這樣看，完整每公里資料放在這裡。</p>
-        {activity_split_table(split_rows)}
       </section>
       {activity_ai_handoff_panel(activity, review, split_rows, weekly_review, monthly_overview, saved_reply)}
     """
@@ -6629,7 +7824,7 @@ def shoes_page_panel(rows, intelligence_rows, workout_rows, status_rows, scope_c
         <div class="coach-summary review-summary">
           <span>先看哪雙鞋更適合什麼</span>
           <p>鞋款頁現在不只是在算公里，而是先回答三件事：哪雙鞋最適合輕鬆恢復、哪雙鞋最適合品質課、哪雙鞋最適合長距離累積。</p>
-          <p class="note">若標註還不夠，先到標註助手補鞋款與課表，這裡的判讀就會自然變清楚。</p>
+          <p class="note">若設定還不夠，先到設定中心補鞋款與課表，這裡的判讀就會自然變清楚。</p>
         </div>
         <div class="metric-grid shoe-kpi-grid">
           {"".join(comparison_cards)}
@@ -6643,7 +7838,7 @@ def shoes_page_panel(rows, intelligence_rows, workout_rows, status_rows, scope_c
       </section>
       <section class="panel-section">
         <h2>鞋款狀態</h2>
-        <p class="note">先把鞋況整理乾淨，之後補歷史活動標註時，標註助手就能區分服役中與已退役鞋款。</p>
+        <p class="note">先把鞋況整理乾淨，之後補歷史活動設定時，設定中心就能區分服役中與已退役鞋款。</p>
         <div class="table-wrap">
           <table>
             <thead>
@@ -6974,17 +8169,17 @@ def metadata_metric_card(label, value, subtext=""):
 def metadata_status_label(row):
     missing = []
     if row["shoe_id"] is None:
-        missing.append("shoe")
+        missing.append("鞋款")
     if row["workout_type_id"] is None:
-        missing.append("workout")
+        missing.append("課表")
     if row["primary_training_purpose_id"] is None:
-        missing.append("purpose")
+        missing.append("目的")
     if not missing:
         return "完整"
-    return "缺少：" + ", ".join(missing)
+    return "缺少：" + "、".join(missing)
 
 
-def metadata_select(name, options, selected_code="", allow_blank=False, include_keep=False):
+def metadata_select(name, options, selected_code="", allow_blank=False, include_keep=False, form_id=""):
     tags = []
     if include_keep:
         tags.append('<option value="__KEEP__">（保留原值）</option>')
@@ -6992,15 +8187,220 @@ def metadata_select(name, options, selected_code="", allow_blank=False, include_
     elif allow_blank:
         tags.append('<option value="">（無）</option>')
     for option in options:
-        code = option["code"]
-        label = option["label"]
-        extra = option.get("extra", "")
+        if isinstance(option, dict):
+            code = option.get("code", "")
+            label = option.get("label", "")
+            extra = option.get("extra", "")
+        else:
+            code = option[0] if len(option) > 0 else ""
+            label = option[1] if len(option) > 1 else code
+            extra = option[2] if len(option) > 2 else ""
         text = label if not extra else f"{label} · {extra}"
         selected = " selected" if selected_code == code else ""
+        form_attr = f' form="{html.escape(form_id, quote=True)}"' if form_id else ""
         tags.append(
             f'<option value="{html.escape(code, quote=True)}"{selected}>{html.escape(text)}</option>'
         )
-    return f'<select name="{html.escape(name, quote=True)}">{"".join(tags)}</select>'
+    form_attr = f' form="{html.escape(form_id, quote=True)}"' if form_id else ""
+    return f'<select name="{html.escape(name, quote=True)}"{form_attr}>{"".join(tags)}</select>'
+
+
+def workout_purpose_mapping_panel(workout_purpose_rows, purpose_rows):
+    if not workout_purpose_rows:
+        return """
+          <section class="panel-section">
+            <h2>課表 / 目的對照</h2>
+            <p class="note">目前還沒有可設定的課表對照。</p>
+          </section>
+        """
+
+    purpose_options = [
+        {
+            "code": row["training_purpose_code"],
+            "label": training_purpose_display_name(row),
+            "extra": purpose_category_display_label(row["purpose_category"]),
+        }
+        for row in purpose_rows
+    ]
+    rows_html = []
+    for row in workout_purpose_rows:
+        primary_selected = row["primary_training_purpose_code"] or ""
+        secondary_selected = row["secondary_training_purpose_code"] or ""
+        rows_html.append(
+            f"""
+            <tr>
+              <td class="workout-purpose-label">
+                <strong>{html.escape(workout_type_display_name(row))}</strong>
+                <span>{html.escape(workout_intensity_display_label(row["intensity_category"]))}</span>
+              </td>
+              <td>
+                <form class="workout-purpose-map-form remember-scroll-form" method="post" action="/metadata/workout-purpose-map">
+                  <input type="hidden" name="workout_type_code" value="{html.escape(str(row["workout_type_code"]), quote=True)}">
+                  <input type="hidden" name="scroll_y" value="">
+                  <label class="stacked-field">
+                    <span>主要目的</span>
+                    {metadata_select("primary_purpose_code", purpose_options, primary_selected, allow_blank=True)}
+                  </label>
+                  <label class="stacked-field">
+                    <span>次要目的</span>
+                    {metadata_select("secondary_purpose_code", purpose_options, secondary_selected, allow_blank=True)}
+                  </label>
+                  <div class="form-actions compact">
+                    <button type="submit">儲存對照</button>
+                  </div>
+                </form>
+              </td>
+            </tr>
+            """
+        )
+
+    return f"""
+      <section class="panel-section">
+        <h2>課表 / 目的對照</h2>
+        <p class="note">每種課表都可以先設定一個主要目的和一個次要目的。這裡的對照會用在活動判讀與預設推論上。</p>
+        <div class="table-wrap workout-purpose-map-table">
+          <table>
+            <thead>
+              <tr>
+                <th>課表</th>
+                <th>主要 / 次要目的</th>
+              </tr>
+            </thead>
+            <tbody>{"".join(rows_html)}</tbody>
+          </table>
+        </div>
+      </section>
+    """
+
+
+def metadata_dimension_overview_panel(workout_rows, purpose_rows):
+    workout_rows_html = []
+    for row in workout_rows:
+        form_id = f"workout-type-form-{html.escape(str(row['workout_type_code']), quote=True)}"
+        workout_rows_html.append(
+            f"""
+            <tr>
+              <td><strong>{html.escape(str(row["workout_type_code"]))}</strong></td>
+              <td><input type="text" name="name_en" form="{form_id}" value="{html.escape(str(row["name_en"] or ""))}" placeholder="Workout Type"></td>
+              <td><input type="text" name="name_zh" form="{form_id}" value="{html.escape(str(row["name_zh"] or ""))}" placeholder="課表名稱"></td>
+              <td>{metadata_select("intensity_category", WORKOUT_INTENSITY_OPTIONS, row["intensity_category"] or "", allow_blank=False, form_id=form_id)}</td>
+              <td>
+                <form id="{form_id}" method="post" action="/metadata/workout-type" class="remember-scroll-form">
+                  <input type="hidden" name="scroll_y" value="">
+                  <input type="hidden" name="workout_type_code" value="{html.escape(str(row["workout_type_code"]), quote=True)}">
+                  <button type="submit">儲存</button>
+                  <button type="submit" formaction="/metadata/delete-workout-type" formmethod="post">刪除</button>
+                </form>
+              </td>
+            </tr>
+            """
+        )
+
+    purpose_rows_html = []
+    for row in purpose_rows:
+        form_id = f"training-purpose-form-{html.escape(str(row['training_purpose_code']), quote=True)}"
+        purpose_rows_html.append(
+            f"""
+            <tr>
+              <td><strong>{html.escape(str(row["training_purpose_code"]))}</strong></td>
+              <td><input type="text" name="name_en" form="{form_id}" value="{html.escape(str(row["name_en"] or ""))}" placeholder="Training Purpose"></td>
+              <td><input type="text" name="name_zh" form="{form_id}" value="{html.escape(str(row["name_zh"] or ""))}" placeholder="訓練目的"></td>
+              <td>{metadata_select("purpose_category", PURPOSE_CATEGORY_OPTIONS, row["purpose_category"] or "", allow_blank=False, form_id=form_id)}</td>
+              <td>
+                <form id="{form_id}" method="post" action="/metadata/training-purpose" class="remember-scroll-form">
+                  <input type="hidden" name="scroll_y" value="">
+                  <input type="hidden" name="training_purpose_code" value="{html.escape(str(row["training_purpose_code"]), quote=True)}">
+                  <button type="submit">儲存</button>
+                  <button type="submit" formaction="/metadata/delete-training-purpose" formmethod="post">刪除</button>
+                </form>
+              </td>
+            </tr>
+            """
+        )
+
+    return f"""
+      <section class="panel-section">
+        <h2>課表庫</h2>
+        <p class="note">這裡只維護課表本身。可以新增、修改中文 / 英文名稱與強度，不會碰到目的對照。</p>
+        <form method="post" action="/metadata/workout-type" class="metadata-form dimension-create-form remember-scroll-form">
+          <input type="hidden" name="scroll_y" value="">
+          <label>
+            <span>新課表代碼</span>
+            <input type="text" name="workout_type_code" placeholder="留白會自動產生">
+          </label>
+          <label>
+            <span>英文名稱</span>
+            <input type="text" name="name_en" placeholder="Tempo Run">
+          </label>
+          <label>
+            <span>中文名稱</span>
+            <input type="text" name="name_zh" placeholder="節奏跑">
+          </label>
+          <label>
+            <span>強度</span>
+            {metadata_select("intensity_category", WORKOUT_INTENSITY_OPTIONS, "Moderate")}
+          </label>
+          <div class="form-actions">
+            <button type="submit">新增課表</button>
+          </div>
+        </form>
+        <div class="table-wrap compact-table-wrap">
+          <table class="dimension-table">
+            <thead>
+              <tr>
+                <th>代碼</th>
+                <th>英文名稱</th>
+                <th>中文名稱</th>
+                <th>強度</th>
+                <th>動作</th>
+              </tr>
+            </thead>
+            <tbody>{''.join(workout_rows_html)}</tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel-section">
+        <h2>目的庫</h2>
+        <p class="note">這裡只維護訓練目的本身。可以新增、修改中文 / 英文名稱與目的類別，不會碰到課表對照。</p>
+        <form method="post" action="/metadata/training-purpose" class="metadata-form dimension-create-form remember-scroll-form">
+          <input type="hidden" name="scroll_y" value="">
+          <label>
+            <span>新目的代碼</span>
+            <input type="text" name="training_purpose_code" placeholder="留白會自動產生">
+          </label>
+          <label>
+            <span>英文名稱</span>
+            <input type="text" name="name_en" placeholder="Threshold">
+          </label>
+          <label>
+            <span>中文名稱</span>
+            <input type="text" name="name_zh" placeholder="乳酸閾值">
+          </label>
+          <label>
+            <span>類別</span>
+            {metadata_select("purpose_category", PURPOSE_CATEGORY_OPTIONS, "Maintenance")}
+          </label>
+          <div class="form-actions">
+            <button type="submit">新增目的</button>
+          </div>
+        </form>
+        <div class="table-wrap compact-table-wrap">
+          <table class="dimension-table">
+            <thead>
+              <tr>
+                <th>代碼</th>
+                <th>英文名稱</th>
+                <th>中文名稱</th>
+                <th>類別</th>
+                <th>動作</th>
+              </tr>
+            </thead>
+            <tbody>{''.join(purpose_rows_html)}</tbody>
+          </table>
+        </div>
+      </section>
+    """
 
 
 def metadata_page_panel(
@@ -7009,6 +8409,7 @@ def metadata_page_panel(
     shoes,
     workouts,
     purposes,
+    workout_purpose_rows,
     quality_row,
     scope_counts,
     scope,
@@ -7035,16 +8436,16 @@ def metadata_page_panel(
     workout_options = [
         {
             "code": row["workout_type_code"],
-            "label": row["name_en"],
-            "extra": row["intensity_category"],
+            "label": workout_type_display_name(row),
+            "extra": workout_intensity_display_label(row["intensity_category"]),
         }
         for row in workouts
     ]
     purpose_options = [
         {
             "code": row["training_purpose_code"],
-            "label": row["name_en"],
-            "extra": row["purpose_category"],
+            "label": training_purpose_display_name(row),
+            "extra": purpose_category_display_label(row["purpose_category"]),
         }
         for row in purposes
     ]
@@ -7091,7 +8492,7 @@ def metadata_page_panel(
 
     table_rows = []
     for row in candidates:
-        edit_link = "/?" + urlencode({"page": "metadata", "edit": row["activity_id"], "scope": scope, "batch": current_page})
+        edit_link = "/?" + urlencode({"page": "metadata", "edit": row["activity_id"], "scope": scope, "batch": current_page}) + "#metadata-edit"
         selected_class = " selected-row" if selected_row and row["activity_id"] == selected_row["activity_id"] else ""
         table_rows.append(
             f"""
@@ -7101,8 +8502,8 @@ def metadata_page_panel(
               <td>{html.escape(str(row["activity_name"] or row["activity_type"] or ""))}</td>
               <td>{format_number(row["distance_km"], 2)}</td>
               <td>{html.escape(str(row["shoe_display_name"] or "未標註"))}</td>
-              <td>{html.escape(str(row["workout_type_name_en"] or "未標註"))}</td>
-              <td>{html.escape(str(row["primary_training_purpose_name_en"] or "未標註"))}</td>
+              <td>{html.escape(str(row["workout_type_name_zh"] or row["workout_type_name_en"] or "未標註"))}</td>
+              <td>{html.escape(str(row["primary_training_purpose_name_zh"] or row["primary_training_purpose_name_en"] or "未標註"))}</td>
               <td>{html.escape(metadata_status_label(row))}</td>
             </tr>
             """
@@ -7112,8 +8513,17 @@ def metadata_page_panel(
     if selected_row:
         selected_secondary_codes = parse_secondary_codes(selected_row["secondary_training_purpose_codes"])
         secondary_selected = selected_secondary_codes[0] if selected_secondary_codes else ""
+        workout_purpose_defaults = {
+            str(row["workout_type_code"] or ""): {
+                "primary": str(row["primary_training_purpose_code"] or ""),
+                "secondary": str(row["secondary_training_purpose_code"] or ""),
+            }
+            for row in workout_purpose_rows
+            if str(row["workout_type_code"] or "")
+        }
+        workout_purpose_defaults_json = json.dumps(workout_purpose_defaults, ensure_ascii=False)
         selected_html = f"""
-          <section class="panel-section">
+          <section class="panel-section" id="metadata-edit">
             <h2>活動編輯</h2>
             <div class="weekly-review-grid">
               <div class="weekly-review-main">
@@ -7129,30 +8539,48 @@ def metadata_page_panel(
                   {detail_chip("距離", f"{format_number(selected_row['distance_km'], 2)} km")}
                   {detail_chip("負荷", "" if selected_row["training_load"] is None else selected_row["training_load"])}
                 </div>
-                <form method="post" action="/metadata/save" class="metadata-form">
+                <form id="metadata-edit-form" method="post" action="/metadata/save" class="metadata-form remember-scroll-form">
                   <input type="hidden" name="activity_id" value="{selected_row["activity_id"]}">
                   <input type="hidden" name="scope" value="{html.escape(scope, quote=True)}">
                   <input type="hidden" name="batch" value="{current_page}">
+                  <input type="hidden" name="scroll_y" value="">
                   <label>
                     <span>鞋款</span>
                     {metadata_select("shoe_code", shoe_options, selected_row["shoe_code"] or "", allow_blank=True)}
                   </label>
                   <label>
                     <span>課表類型</span>
-                    {metadata_select("workout_type_code", workout_options, selected_row["workout_type_code"] or "", allow_blank=True)}
+                    {metadata_select("workout_type_code", workout_options, selected_row["workout_type_code"] or "", allow_blank=True, form_id="metadata-edit-form")}
                   </label>
                   <label>
-                    <span>主要目的</span>
-                    {metadata_select("primary_purpose_code", purpose_options, selected_row["primary_training_purpose_code"] or "", allow_blank=True)}
+                    <span>主要訓練目的</span>
+                    {metadata_select("primary_purpose_code", purpose_options, selected_row["primary_training_purpose_code"] or "", allow_blank=True, form_id="metadata-edit-form")}
                   </label>
                   <label>
-                    <span>次要目的</span>
-                    {metadata_select("secondary_purpose_code", purpose_options, secondary_selected, allow_blank=True)}
+                    <span>次要訓練目的</span>
+                    {metadata_select("secondary_purpose_code", purpose_options, secondary_selected, allow_blank=True, form_id="metadata-edit-form")}
                   </label>
                   <div class="form-actions">
                     <button type="submit">儲存標註</button>
                   </div>
                 </form>
+                <script>
+                  (() => {{
+                    const form = document.getElementById("metadata-edit-form");
+                    if (!form) return;
+                    const workoutSelect = form.querySelector('select[name="workout_type_code"]');
+                    const primarySelect = form.querySelector('select[name="primary_purpose_code"]');
+                    const secondarySelect = form.querySelector('select[name="secondary_purpose_code"]');
+                    const purposeDefaults = {workout_purpose_defaults_json};
+                    if (!workoutSelect || !primarySelect || !secondarySelect) return;
+
+                    workoutSelect.addEventListener("change", () => {{
+                      const defaults = purposeDefaults[workoutSelect.value] || {{"primary": "", "secondary": ""}};
+                      primarySelect.value = defaults.primary || "";
+                      secondarySelect.value = defaults.secondary || "";
+                    }});
+                  }})();
+                </script>
               </div>
               <div class="weekly-review-side">
                 <div class="review-card">
@@ -7162,13 +8590,13 @@ def metadata_page_panel(
                 </div>
                 <div class="review-card">
                   <span>目前課表</span>
-                  <strong>{html.escape(str(selected_row["workout_type_name_en"] or "未標註"))}</strong>
+                  <strong>{html.escape(str(selected_row["workout_type_name_zh"] or selected_row["workout_type_name_en"] or "未標註"))}</strong>
                   <p>描述這堂課怎麼跑</p>
                 </div>
                 <div class="review-card">
                   <span>目前目的</span>
-                  <strong>{html.escape(str(selected_row["primary_training_purpose_name_en"] or "未標註"))}</strong>
-                  <p>{html.escape(str(selected_row["secondary_training_purpose_names_en"] or "目前沒有次要目的"))}</p>
+                  <strong>{html.escape(str(selected_row["primary_training_purpose_name_zh"] or selected_row["primary_training_purpose_name_en"] or "未標註"))}</strong>
+                  <p>{html.escape(str(selected_row["secondary_training_purpose_names_zh"] or selected_row["secondary_training_purpose_names_en"] or "目前沒有次要目的"))}</p>
                 </div>
               </div>
             </div>
@@ -7191,13 +8619,13 @@ def metadata_page_panel(
     return f"""
       {message_html}
       <section class="panel-section">
-        <h2>標註助手</h2>
+        <h2>設定工作台</h2>
         <div class="weekly-review-grid">
           <div class="weekly-review-main">
             <div class="review-header">
               <div>
-                <span class="eyebrow">標註補齊工作台</span>
-                <strong>補齊缺少的鞋款、課表與訓練目的</strong>
+                <span class="eyebrow">設定補齊工作台</span>
+                <strong>集中調整鞋款、課表、目的與對照</strong>
               </div>
               <span class="status-badge balanced">目前顯示 {len(candidates)} / {total_in_scope} 筆</span>
             </div>
@@ -7208,8 +8636,8 @@ def metadata_page_panel(
               {metadata_metric_card("目前範圍", current_scope_name, "可先依缺項縮小範圍")}
             </div>
             <div class="coach-summary review-summary">
-              <span>助手原則</span>
-              <p>標註助手只補你真的知道的資料。看不到答案的活動，就先保留未標註，讓平台誠實反映目前的 Source of Truth。</p>
+              <span>設定原則</span>
+              <p>設定頁只調你真的知道的字典與對照。看不到答案的活動，就先保留原狀，讓平台誠實反映目前的 Source of Truth。</p>
             </div>
           </div>
           <div class="weekly-review-side">
@@ -7220,8 +8648,8 @@ def metadata_page_panel(
             </div>
             <div class="review-card">
               <span>退役鞋款</span>
-              <strong>可補標</strong>
-              <p>只要資料匯入工具下拉選單有的鞋，都能用來補歷史資料</p>
+              <strong>可調整</strong>
+              <p>只要資料匯入工具下拉選單有的鞋，都能用來調整歷史資料</p>
             </div>
           </div>
         </div>
@@ -7239,9 +8667,10 @@ def metadata_page_panel(
       <section class="panel-section">
         <h2>批次補標</h2>
         <p class="note">先選幾筆活動，再把相同標註一次套用。若只想更新其中一項，就把其他欄位留在保留原值。</p>
-        <form method="post" action="/metadata/batch">
+        <form method="post" action="/metadata/batch" class="remember-scroll-form">
           <input type="hidden" name="scope" value="{html.escape(scope, quote=True)}">
           <input type="hidden" name="batch" value="{current_page}">
+          <input type="hidden" name="scroll_y" value="">
           <div class="metadata-batch-bar">
             <label>
               <span>鞋款</span>
@@ -7282,6 +8711,120 @@ def metadata_page_panel(
           </div>
         </form>
         {pagination_html}
+      </section>
+    """
+
+
+def settings_page_panel(dropdown_options, workout_rows, purpose_rows, workout_purpose_rows, feedback_difficulty_rows, feedback_feel_rows, message=""):
+    message_html = f'<section class="status">{html.escape(message)}</section>' if message else ""
+    return f"""
+      {message_html}
+      <section class="panel-section">
+        <h2>設定中心</h2>
+        <div class="weekly-review-grid">
+          <div class="weekly-review-main">
+            <div class="review-header">
+              <div>
+                <span class="eyebrow">設定字典</span>
+                <strong>課表、目的與對照都放在這裡</strong>
+              </div>
+              <span class="status-badge balanced">字典管理</span>
+            </div>
+            <div class="coach-summary review-summary">
+              <span>設定原則</span>
+              <p>這一頁只管理字典與對照，不碰單筆活動的標註流程。鞋款請到鞋款頁整理；課表與目的在下方字典區；感受難度與感覺如何在這一區獨立維護。</p>
+            </div>
+          </div>
+          <div class="weekly-review-side">
+            <div class="review-card">
+              <span>課表</span>
+              <strong>獨立維護</strong>
+              <p>可以先改名字、強度與分類，不影響活動標註頁。</p>
+            </div>
+            <div class="review-card">
+              <span>目的</span>
+              <strong>獨立維護</strong>
+              <p>課表 / 目的對照另外設定，避免一對一綁死。</p>
+            </div>
+            <div class="review-card">
+              <span>鞋款</span>
+              <strong>回到鞋款頁</strong>
+              <p>鞋款維護會跟鞋款頁的狀態一起走，不在這裡重複管理。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {feedback_dictionary_tables_panel(feedback_difficulty_rows, feedback_feel_rows)}
+
+      {metadata_dimension_overview_panel(workout_rows, purpose_rows)}
+
+      {workout_purpose_mapping_panel(workout_purpose_rows, purpose_rows)}
+    """
+
+
+def feedback_dictionary_tables_panel(feedback_difficulty_rows, feedback_feel_rows):
+    return f"""
+      <section class="panel-section">
+        <h2>回饋字典</h2>
+        <p class="note">這裡只管理跑步回饋用的兩個字典。每一列都可以新增、修改、刪除，和課表、目的一樣。</p>
+        <div class="feedback-dictionary-grid">
+          {feedback_dictionary_panel("garmin_rpe", "感受難度", "例如 1 - 非常輕鬆", feedback_difficulty_rows)}
+          {feedback_dictionary_panel("garmin_feel", "感覺如何", "例如 普通", feedback_feel_rows)}
+        </div>
+      </section>
+    """
+
+
+def feedback_dictionary_panel(dictionary_key, title, placeholder, rows):
+    create_form_id = f"feedback-create-{html.escape(dictionary_key, quote=True)}"
+    row_entries = []
+    for row in rows:
+        row_form_id = f"feedback-row-{dictionary_key}-{html.escape(str(row['id']), quote=True)}"
+        row_entries.append(
+            f"""
+            <tr>
+              <td>
+                <input type="text" name="label" form="{row_form_id}" value="{html.escape(str(row['label'] or ''), quote=True)}" placeholder="{html.escape(placeholder, quote=True)}">
+              </td>
+              <td class="row-action-cell">
+                <form id="{row_form_id}" method="post" action="/settings/feedback-dictionary-option" class="remember-scroll-form">
+                  <input type="hidden" name="dictionary_key" value="{html.escape(dictionary_key, quote=True)}">
+                  <input type="hidden" name="option_id" value="{html.escape(str(row['id']), quote=True)}">
+                  <input type="hidden" name="scroll_y" value="">
+                  <button type="submit" name="action" value="update">儲存</button>
+                  <button type="submit" name="action" value="delete" formaction="/settings/feedback-dictionary-option" formmethod="post">刪除</button>
+                </form>
+              </td>
+            </tr>
+            """
+        )
+
+    return f"""
+      <section class="panel-section feedback-dictionary-panel">
+        <h3>{html.escape(title)}</h3>
+        <form id="{create_form_id}" method="post" action="/settings/feedback-dictionary-option" class="feedback-dictionary-create-form remember-scroll-form">
+          <input type="hidden" name="dictionary_key" value="{html.escape(dictionary_key, quote=True)}">
+          <input type="hidden" name="scroll_y" value="">
+          <label>
+            <span>新增項目</span>
+            <input type="text" name="label" placeholder="{html.escape(placeholder, quote=True)}">
+          </label>
+          <div class="form-actions">
+            <button type="submit" name="action" value="create">新增</button>
+          </div>
+        </form>
+        <div class="table-wrap dimension-table feedback-dictionary-table">
+          <table>
+            <thead>
+              <tr>
+                <th>項目</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>{"".join(row_entries) if row_entries else '<tr><td colspan=\"2\">目前沒有項目。</td></tr>'}</tbody>
+          </table>
+        </div>
       </section>
     """
 
@@ -7613,6 +9156,18 @@ def base_styles():
       outline: 2px solid #f3c7ae;
       outline-offset: -2px;
     }
+    .compact-table-wrap {
+      box-shadow: none;
+      border-radius: 14px;
+    }
+    .compact-table-wrap table {
+      min-width: 0;
+    }
+    .compact-table-wrap th,
+    .compact-table-wrap td {
+      padding: 7px 8px;
+      font-size: 13px;
+    }
     table {
       width: 100%;
       min-width: 560px;
@@ -7754,6 +9309,129 @@ def base_styles():
     }
     .detail-chip b {
       color: var(--ink);
+    }
+    .raw-data-card {
+      min-height: 0;
+      align-content: start;
+      gap: 14px;
+    }
+    .raw-data-key-chips {
+      margin-bottom: 0;
+    }
+    .raw-data-details-panel {
+      display: grid;
+      gap: 10px;
+    }
+    .raw-data-details-panel[hidden] {
+      display: none !important;
+    }
+    .raw-data-toggle {
+      width: fit-content;
+    }
+    .raw-data-tablist {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .raw-data-tab {
+      min-height: 36px;
+      padding: 0 14px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    .raw-data-tab.active {
+      background: var(--ink);
+      color: #fff;
+      border-color: var(--ink);
+    }
+    .raw-data-tab-panels {
+      display: grid;
+      gap: 14px;
+    }
+    .raw-data-tab-panel[hidden] {
+      display: none !important;
+    }
+    .raw-data-columns {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 44px;
+      align-items: start;
+    }
+    .raw-data-column {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+      min-width: 0;
+    }
+    .raw-data-group {
+      display: grid;
+      gap: 4px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+    }
+    .raw-data-group h3 {
+      margin: 0 0 4px;
+      padding: 0 0 8px;
+      border-bottom: 1px solid var(--line);
+      color: var(--ink);
+      font-size: 15px;
+      line-height: 1.25;
+      font-weight: 900;
+    }
+    .raw-data-group-body {
+      display: grid;
+      gap: 0;
+    }
+    .raw-data-split-note {
+      margin: 0;
+    }
+    .raw-data-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 18px;
+      align-items: baseline;
+      min-height: 38px;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(22, 36, 58, 0.08);
+    }
+    .raw-data-row:last-child {
+      border-bottom: 0;
+    }
+    .raw-data-row span {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
+      line-height: 1.3;
+      min-width: 0;
+    }
+    .raw-data-row strong {
+      color: var(--ink);
+      font-size: 9px;
+      line-height: 1.2;
+      font-weight: 900;
+      white-space: nowrap;
+      text-align: right;
+      padding-left: 8px;
+    }
+    .raw-data-row strong.raw-data-larger {
+      font-size: 10px;
+    }
+    .activity-compact-card {
+      min-height: 0;
+      align-content: start;
+      gap: 10px;
+    }
+    .activity-compact-card strong {
+      font-size: 20px;
+      line-height: 1.25;
     }
     .today-panel {
       display: grid;
@@ -8025,11 +9703,31 @@ def base_styles():
       display: grid;
       grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.8fr);
       gap: 12px;
+      align-items: start;
+    }
+    .activity-summary-grid {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    .activity-summary-grid .weekly-review-main {
+      flex: 1 1 0;
+    }
+    .activity-summary-grid .weekly-review-side {
+      flex: 0 0 min(38vw, 360px);
+    }
+    .activity-summary-grid .coach-summary {
+      min-height: 0;
+    }
+    .summary-chips {
+      margin-top: 4px;
     }
     .weekly-review-main,
     .weekly-review-side {
       display: grid;
       gap: 12px;
+      align-content: start;
+      align-items: start;
     }
     .review-header {
       display: flex;
@@ -8156,6 +9854,109 @@ def base_styles():
       color: var(--muted);
       line-height: 1.5;
       font-weight: 700;
+    }
+    .knowledge-conversation-card,
+    .knowledge-learned-card {
+      gap: 12px;
+      align-content: start;
+    }
+    .knowledge-conversation-card strong,
+    .knowledge-learned-card strong {
+      font-size: 24px;
+      line-height: 1.15;
+    }
+    .knowledge-complete-badge {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      padding: 7px 12px;
+      border-radius: 999px;
+      background: #e9f7ef;
+      color: #176b45;
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .knowledge-complete-next {
+      display: grid;
+      gap: 4px;
+      padding: 12px 14px;
+      border-radius: 18px;
+      background: #f7fafc;
+      border: 1px solid var(--line);
+    }
+    .knowledge-complete-next span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .knowledge-complete-next strong {
+      font-size: 18px;
+      line-height: 1.2;
+    }
+    .knowledge-complete-next p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.5;
+    }
+    .knowledge-current {
+      color: var(--ink);
+      font-size: 16px;
+      font-weight: 800;
+      line-height: 1.55;
+    }
+    .knowledge-because {
+      display: grid;
+      gap: 6px;
+      padding: 12px 0 0;
+      border-top: 1px solid var(--line);
+    }
+    .knowledge-because span,
+    .knowledge-chooser summary {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .knowledge-because p {
+      margin: 0;
+      color: var(--ink);
+      line-height: 1.65;
+      font-weight: 700;
+    }
+    .knowledge-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+    .knowledge-action-form,
+    .knowledge-choice-form {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: end;
+    }
+    .knowledge-chooser {
+      padding-top: 10px;
+      border-top: 1px solid var(--line);
+    }
+    .knowledge-chooser summary {
+      cursor: pointer;
+      margin-bottom: 10px;
+    }
+    .subsection-title {
+      margin: 16px 0 8px;
+      font-size: 15px;
+      line-height: 1.35;
+      color: var(--ink);
+      font-weight: 900;
     }
     .metric-collection {
       min-height: 0;
@@ -8775,6 +10576,167 @@ def base_styles():
       color: var(--ink);
       font: inherit;
     }
+    .metadata-form input[type="text"],
+    .metadata-form input[type="number"],
+    .metadata-form textarea,
+    .metadata-batch-bar input[type="text"],
+    .dimension-create-form input[type="text"] {
+      width: 100%;
+      min-height: 38px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+    }
+    .metadata-form textarea {
+      min-height: 220px;
+      padding: 12px;
+      resize: vertical;
+      font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .feedback-dictionary-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      align-items: start;
+    }
+    .feedback-dictionary-grid label {
+      display: grid;
+      gap: 6px;
+    }
+    .feedback-dictionary-grid label span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    .feedback-dictionary-panel {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+    .feedback-dictionary-panel h3 {
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.2;
+    }
+    .feedback-dictionary-create-form {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: end;
+      margin: 0;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: 0 8px 22px rgba(31, 41, 51, 0.05);
+    }
+    .feedback-dictionary-create-form label {
+      display: grid;
+      gap: 6px;
+    }
+    .feedback-dictionary-create-form label span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    .feedback-dictionary-create-form input[type="text"] {
+      width: 100%;
+      min-height: 38px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+    }
+    .feedback-dictionary-create-form .form-actions {
+      align-self: end;
+    }
+    .feedback-dictionary-create-form .form-actions button {
+      min-width: 104px;
+    }
+    .feedback-dictionary-table input[type="text"] {
+      width: 100%;
+      min-height: 38px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+    }
+    .feedback-dictionary-table .row-action-cell {
+      width: 172px;
+      white-space: nowrap;
+    }
+    .feedback-dictionary-table .row-action-cell form {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .dimension-create-form {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      margin: 0 0 12px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: 0 8px 22px rgba(31, 41, 51, 0.05);
+    }
+    .dimension-create-form .form-actions {
+      align-self: end;
+    }
+    .dimension-create-form .form-actions button {
+      width: 100%;
+    }
+    .dimension-table input[type="text"],
+    .dimension-table select {
+      width: 100%;
+      min-height: 34px;
+      padding: 0 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+    }
+    .dimension-table td:last-child,
+    .dimension-table th:last-child {
+      white-space: nowrap;
+      width: 92px;
+    }
+    .workout-purpose-map-table table td {
+      vertical-align: top;
+    }
+    .workout-purpose-label {
+      display: grid;
+      gap: 4px;
+      min-width: 160px;
+    }
+    .workout-purpose-label strong {
+      font-size: 18px;
+      line-height: 1.25;
+    }
+    .workout-purpose-label span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    .workout-purpose-map-form {
+      display: grid;
+      gap: 10px;
+    }
+    .stacked-field {
+      display: grid;
+      gap: 6px;
+    }
     .form-actions {
       display: flex;
       align-items: end;
@@ -8794,6 +10756,21 @@ def base_styles():
       font-weight: 800;
       cursor: pointer;
     }
+    .primary-action {
+      min-height: 40px;
+      padding: 0 14px;
+      border: 0;
+      border-radius: 8px;
+      background: linear-gradient(135deg, var(--accent-deep), var(--teal));
+      color: #fff;
+      font: inherit;
+      font-weight: 800;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      text-decoration: none;
+    }
     .form-actions button:hover {
       opacity: 0.94;
     }
@@ -8807,6 +10784,10 @@ def base_styles():
       font: inherit;
       font-weight: 800;
       cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      text-decoration: none;
     }
     .secondary-action:hover {
       background: #f7fafb;
@@ -9149,6 +11130,10 @@ def base_styles():
       .shoe-kpi-grid { grid-template-columns: 1fr; }
       .training-kpi-grid { grid-template-columns: 1fr; }
       .briefing-evidence-grid { grid-template-columns: 1fr; }
+      .raw-data-columns { grid-template-columns: 1fr; }
+      .raw-data-toggle { width: 100%; }
+      .raw-data-tablist { width: 100%; }
+      .raw-data-tab { flex: 1 1 calc(33.333% - 8px); }
       .state-sequence { grid-template-columns: 1fr; row-gap: 12px; column-gap: 0; }
       .state-node-wrap { min-width: 0; display: grid; grid-template-columns: 1fr; gap: 8px; }
       .state-connector { width: 2px; height: 16px; justify-self: center; margin: 0 auto; }
@@ -9174,7 +11159,8 @@ def page_hero(page):
         "journey": ("Journey", "時間怎麼串起來", "把每個月串成一段旅程。"),
         "shoes": ("Shoes", "鞋款如何分工", "讓鞋款資訊變成決策。"),
         "training": ("Training", "訓練結構", "先看結構，再看缺口。"),
-        "metadata": ("Annotation", "今天還缺哪些標註", "把缺口補齊，讓系統更誠實。"),
+        "metadata": ("Annotation", "今天要補哪些標註", "把活動補齊，讓系統更誠實。"),
+        "settings": ("Settings", "今天調哪些設定", "把字典與對照集中在同一處。"),
     }
     page_slug, page_title, page_hint = page_labels.get(page, page_labels["home"])
     cta_map = {
@@ -9182,10 +11168,11 @@ def page_hero(page):
         "activity": ("查看本週回顧", "/?page=weekly"),
         "weekly": ("查看月回顧", "/?page=monthly"),
         "monthly": ("查看旅程", "/?page=journey"),
-        "journey": ("查看標註缺口", "/?page=metadata"),
+        "journey": ("查看設定", "/?page=settings"),
         "shoes": ("查看訓練頁", "/?page=training"),
         "training": ("開始補標註", "/?page=metadata"),
         "metadata": ("開始補標註", "/?page=metadata"),
+        "settings": ("開始調整設定", "/?page=settings"),
     }
     cta_label, cta_href = cta_map.get(page, cta_map["home"])
     logo_src = f"/assets/{COACHOS_LOGO}" if (ASSETS_DIR / COACHOS_LOGO).exists() else "/assets/coachos_logo_transparent.png"
@@ -9210,7 +11197,7 @@ def page_hero(page):
     """
 
 
-def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="unassigned", message="", month="", week="", batch="1"):
+def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="unassigned", message="", month="", week="", batch="1", coach_step="shoe", scroll_y=""):
     handoff_script = """
   <script>
     function extractAiReplyMarkdown(raw) {
@@ -9306,6 +11293,93 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
         }
       }
     }
+
+    function restoreCoachScroll() {
+      const params = new URLSearchParams(window.location.search);
+      const raw = params.get("scroll_y");
+      if (raw === null) return;
+      const value = Number.parseInt(raw, 10);
+      if (Number.isNaN(value)) return;
+      window.requestAnimationFrame(() => {
+        window.scrollTo({ top: value, left: 0, behavior: "auto" });
+      });
+      window.setTimeout(() => {
+        window.scrollTo({ top: value, left: 0, behavior: "auto" });
+      }, 60);
+    }
+
+    function stashCoachScroll(form) {
+      if (!form) return;
+      const input = form.querySelector('input[name="scroll_y"]');
+      if (!input) return;
+      input.value = String(Math.max(0, Math.round(window.scrollY || 0)));
+    }
+
+    document.addEventListener("submit", function (event) {
+      const form = event.target.closest("form.remember-scroll-form");
+      if (!form) return;
+      stashCoachScroll(form);
+    });
+
+    document.addEventListener("click", function (event) {
+      const link = event.target.closest("a.remember-scroll-link");
+      if (!link) return;
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const current = new URL(link.href, window.location.href);
+      current.searchParams.set("scroll_y", String(Math.max(0, Math.round(window.scrollY || 0))));
+      link.href = current.toString();
+    });
+
+    document.addEventListener("click", function (event) {
+      const button = event.target.closest("button.raw-data-toggle");
+      if (!button || event.defaultPrevented) return;
+      const targetId = button.getAttribute("data-raw-target");
+      if (!targetId) return;
+      const panel = document.getElementById(targetId);
+      if (!panel) return;
+      const isHidden = panel.hasAttribute("hidden");
+      if (isHidden) {
+        panel.removeAttribute("hidden");
+        button.textContent = button.getAttribute("data-open-label") || "隱藏細節";
+        setRawDataTab(panel, "data");
+      } else {
+        panel.setAttribute("hidden", "");
+        button.textContent = button.getAttribute("data-closed-label") || "顯示細節";
+      }
+    });
+
+    function setRawDataTab(panel, activeTab) {
+      if (!panel) return;
+      const tabs = panel.querySelectorAll("button.raw-data-tab");
+      const panels = panel.querySelectorAll(".raw-data-tab-panel");
+      tabs.forEach(function (tab) {
+        const isActive = tab.getAttribute("data-raw-tab") === activeTab;
+        tab.classList.toggle("active", isActive);
+        tab.setAttribute("aria-selected", isActive ? "true" : "false");
+      });
+      panels.forEach(function (tabPanel) {
+        const isActive = tabPanel.getAttribute("data-raw-panel") === activeTab;
+        if (isActive) {
+          tabPanel.removeAttribute("hidden");
+        } else {
+          tabPanel.setAttribute("hidden", "");
+        }
+      });
+    }
+
+    document.addEventListener("click", function (event) {
+      const tab = event.target.closest("button.raw-data-tab");
+      if (!tab || event.defaultPrevented) return;
+      const panel = tab.closest(".raw-data-details-panel");
+      if (!panel) return;
+      const activeTab = tab.getAttribute("data-raw-tab");
+      if (!activeTab) return;
+      setRawDataTab(panel, activeTab);
+    });
+
+    window.history.scrollRestoration = "manual";
+    document.addEventListener("DOMContentLoaded", restoreCoachScroll);
+    window.addEventListener("load", restoreCoachScroll);
   </script>
 """
 
@@ -9337,6 +11411,9 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     weekly_rows_with_labels = []
     week_rows = []
     selected_week = ""
+    activity_shoe_rows = []
+    activity_workout_rows = []
+    activity_purpose_rows = []
     distribution_rows = []
     weekly_key_session_rows = []
     month_rows = []
@@ -9364,15 +11441,21 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     shoe_status_data = []
     shoe_intelligence_rows = []
     shoe_workout_rows = []
+    settings_dropdown_options = load_metadata_dropdown_options()
     metadata_shoes = []
     metadata_workouts = []
     metadata_purposes = []
+    metadata_workout_purpose_rows = []
+    feedback_difficulty_rows = []
+    feedback_feel_rows = []
     metadata_rows = []
     metadata_selected = None
     metadata_scope_data = None
     shoes_scope_data = None
     metadata_page_number = max(1, int(batch)) if str(batch).isdigit() else 1
     metadata_page_size = 60
+    coach_step = str(coach_step or "shoe")
+    scroll_y = str(scroll_y or "")
     recent = []
     activity_rows = []
     latest_activity = None
@@ -9403,6 +11486,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
             activity_rows = available_activities(connection)
             selected = selected_activity(connection, int(activity_id) if str(activity_id).isdigit() else None)
             split_rows = splits(connection, selected["activity_id"] if selected else None)
+            _dropdown_options, activity_shoe_rows, activity_workout_rows, activity_purpose_rows, _activity_workout_purpose_rows = metadata_choice_sets(connection)
             weekly = week_summary(connection)
             intelligence = weekly_intelligence(connection)
             monthly = selected_month_summary(connection, None)
@@ -9445,7 +11529,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
             recent_training_rows = recent_training_intent(connection, limit=8)
 
         elif page == "metadata":
-            _dropdown_options, metadata_shoes, metadata_workouts, metadata_purposes = metadata_choice_sets(connection)
+            _dropdown_options, metadata_shoes, metadata_workouts, metadata_purposes, metadata_workout_purpose_rows = metadata_choice_sets(connection)
             metadata_scope_data = metadata_scope_counts(connection)
             total_in_scope = metadata_scope_total(metadata_scope_data, scope)
             total_pages = max(1, (total_in_scope + metadata_page_size - 1) // metadata_page_size) if metadata_page_size > 0 else 1
@@ -9461,6 +11545,12 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
                 connection,
                 int(edit_activity_id) if str(edit_activity_id).isdigit() else (metadata_rows[0]["activity_id"] if metadata_rows else 0),
             ) if (edit_activity_id or metadata_rows) else None
+
+        elif page == "settings":
+            settings_dropdown_options, metadata_shoes, metadata_workouts, metadata_purposes, metadata_workout_purpose_rows = metadata_choice_sets(connection)
+            feedback_difficulty_rows = feedback_dictionary_rows(connection, "garmin_rpe")
+            feedback_feel_rows = feedback_dictionary_rows(connection, "garmin_feel")
+            metadata_scope_data = metadata_scope_counts(connection)
 
         else:
             weekly = week_summary(connection)
@@ -9511,7 +11601,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
 
     if page == "activity":
         return f"""{html_start}
-    {activity_review_panel(selected, split_rows, activity_rows, selected["activity_id"] if selected else "", weekly_review, monthly_overview, activity_ai_reply)}
+    {activity_review_panel(selected, split_rows, activity_rows, selected["activity_id"] if selected else "", activity_shoe_rows, activity_workout_rows, activity_purpose_rows, coach_step, weekly_review, monthly_overview, activity_ai_reply)}
     {archive_metric_strip(summary)}
   </main>
 </body>
@@ -9556,6 +11646,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
         metadata_shoes,
         metadata_workouts,
         metadata_purposes,
+        metadata_workout_purpose_rows,
         training_quality_row,
         metadata_scope_data,
         scope,
@@ -9563,6 +11654,14 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
         metadata_page_number,
         metadata_page_size,
     )}
+    {archive_metric_strip(summary)}
+  </main>
+</body>
+</html>"""
+
+    if page == "settings":
+        return f"""{html_start}
+    {settings_page_panel(settings_dropdown_options, metadata_workouts, metadata_purposes, metadata_workout_purpose_rows, feedback_difficulty_rows, feedback_feel_rows, message)}
     {archive_metric_strip(summary)}
   </main>
 </body>
@@ -9652,7 +11751,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         query = parse_qs(parsed.query)
         page = (query.get("page") or ["home"])[0]
-        if page not in {"home", "activity", "journey", "weekly", "monthly", "shoes", "training", "metadata"}:
+        if page not in {"home", "activity", "journey", "weekly", "monthly", "shoes", "training", "metadata", "settings"}:
             page = "home"
         self.send_html(
             render_dashboard(
@@ -9664,6 +11763,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 (query.get("month") or [""])[0],
                 (query.get("week") or [""])[0],
                 (query.get("batch") or ["1"])[0],
+                (query.get("coach_step") or ["shoe"])[0],
+                (query.get("scroll_y") or [""])[0],
             )
         )
 
@@ -9768,9 +11869,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/shoes/add":
             form = parse_qs(body.decode("utf-8"))
             try:
-                shoe_name = append_shoe_option(first_form_value(form, "shoe_name"))
                 with connect() as connection:
-                    ensure_metadata_dimensions(connection, load_metadata_dropdown_options())
+                    shoe_name = append_shoe_option(first_form_value(form, "shoe_name"), connection)
+                    ensure_metadata_dimensions(connection, load_metadata_dropdown_options(connection))
                     connection.commit()
                 message = f"已新增鞋款：{shoe_name}"
             except ValueError as exc:
@@ -9815,11 +11916,76 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.redirect(location)
             return
 
+        if parsed.path == "/activity/coach-knowledge":
+            form = parse_qs(body.decode("utf-8"))
+            activity_id = int(first_form_value(form, "activity_id", "0") or "0")
+            coach_step = first_form_value(form, "coach_step", "shoe")
+            action = first_form_value(form, "action", "confirm")
+            choice_code = first_form_value(form, "choice_code", "").strip()
+            scroll_y = first_form_value(form, "scroll_y", "").strip()
+
+            next_stage = {
+                "shoe": "workout",
+                "workout": "purpose",
+                "purpose": "purpose_learned",
+            }.get(coach_step, "shoe")
+            learned_stage = f"{coach_step}_learned" if coach_step in {"shoe", "workout", "purpose"} else "shoe_learned"
+
+            with connect() as connection:
+                current = selected_activity(connection, activity_id)
+                if current and action in {"confirm", "choose"} and choice_code:
+                    if coach_step == "shoe":
+                        update_single_activity_metadata(
+                            connection,
+                            activity_id,
+                            choice_code,
+                            current["workout_type_code"] or "",
+                            current["primary_training_purpose_code"] or "",
+                            "",
+                        )
+                    elif coach_step == "workout":
+                        update_single_activity_metadata(
+                            connection,
+                            activity_id,
+                            current["shoe_code"] or "",
+                            choice_code,
+                            current["primary_training_purpose_code"] or "",
+                            "",
+                        )
+                    elif coach_step == "purpose":
+                        update_single_activity_metadata(
+                            connection,
+                            activity_id,
+                            current["shoe_code"] or "",
+                            current["workout_type_code"] or "",
+                            choice_code,
+                            "",
+                        )
+                    connection.commit()
+
+            if action == "skip" and coach_step in {"shoe", "workout", "purpose"}:
+                redirect_step = next_stage
+            else:
+                redirect_step = learned_stage
+            redirect_anchor = "#activity-evidence" if redirect_step == "purpose_learned" else "#activity-knowledge"
+
+            location = "/?" + urlencode(
+                {
+                    "page": "activity",
+                    "activity": activity_id,
+                    "coach_step": redirect_step,
+                    "scroll_y": scroll_y,
+                }
+            ) + redirect_anchor
+            self.redirect(location)
+            return
+
         if parsed.path == "/metadata/save":
             form = parse_qs(body.decode("utf-8"))
             activity_id = int(first_form_value(form, "activity_id", "0") or "0")
             scope = first_form_value(form, "scope", "unassigned")
             batch = first_form_value(form, "batch", "1")
+            scroll_y = first_form_value(form, "scroll_y", "").strip()
             shoe_code = first_form_value(form, "shoe_code")
             workout_code = first_form_value(form, "workout_type_code")
             primary_code = first_form_value(form, "primary_purpose_code")
@@ -9845,6 +12011,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "message": "標註已儲存",
                 }
             )
+            if scroll_y:
+                location += "&" + urlencode({"scroll_y": scroll_y})
             self.redirect(location)
             return
 
@@ -9852,6 +12020,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             form = parse_qs(body.decode("utf-8"))
             scope = first_form_value(form, "scope", "unassigned")
             batch = first_form_value(form, "batch", "1")
+            scroll_y = first_form_value(form, "scroll_y", "").strip()
             activity_ids = [int(value) for value in form.get("activity_id", []) if str(value).isdigit()]
             shoe_code = first_form_value(form, "batch_shoe_code", "__KEEP__")
             workout_code = first_form_value(form, "batch_workout_type_code", "__KEEP__")
@@ -9878,7 +12047,154 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "message": message,
                 }
             )
+            if scroll_y:
+                location += "&" + urlencode({"scroll_y": scroll_y})
             self.redirect(location)
+            return
+
+        if parsed.path == "/metadata/workout-purpose-map":
+            form = parse_qs(body.decode("utf-8"))
+            workout_type_code = first_form_value(form, "workout_type_code", "").strip()
+            primary_purpose_code = first_form_value(form, "primary_purpose_code", "").strip()
+            secondary_purpose_code = first_form_value(form, "secondary_purpose_code", "").strip()
+            scroll_y = first_form_value(form, "scroll_y", "").strip()
+
+            with connect() as connection:
+                save_workout_purpose_mapping(
+                    connection,
+                    workout_type_code,
+                    primary_purpose_code,
+                    secondary_purpose_code,
+                )
+                connection.commit()
+
+            self.redirect(
+                "/?" + urlencode(
+                    {
+                        "page": "settings",
+                        "message": "課表與目的對照已儲存",
+                    }
+                )
+                + (("&" + urlencode({"scroll_y": scroll_y})) if scroll_y else "")
+            )
+            return
+
+        if parsed.path == "/metadata/workout-type":
+            form = parse_qs(body.decode("utf-8"))
+            scroll_y = first_form_value(form, "scroll_y", "").strip()
+            workout_type_code = first_form_value(form, "workout_type_code", "").strip()
+            name_en = first_form_value(form, "name_en", "").strip()
+            name_zh = first_form_value(form, "name_zh", "").strip()
+            intensity_category = first_form_value(form, "intensity_category", "Moderate").strip()
+            try:
+                with connect() as connection:
+                    save_workout_type_dimension(
+                        connection,
+                        workout_type_code,
+                        name_en,
+                        name_zh,
+                        intensity_category,
+                    )
+                    connection.commit()
+                message = "課表庫已儲存"
+            except Exception as exc:
+                message = str(exc)
+            params = {"page": "settings", "message": message}
+            if scroll_y:
+                params["scroll_y"] = scroll_y
+            self.redirect("/?" + urlencode(params))
+            return
+
+        if parsed.path == "/metadata/training-purpose":
+            form = parse_qs(body.decode("utf-8"))
+            scroll_y = first_form_value(form, "scroll_y", "").strip()
+            training_purpose_code = first_form_value(form, "training_purpose_code", "").strip()
+            name_en = first_form_value(form, "name_en", "").strip()
+            name_zh = first_form_value(form, "name_zh", "").strip()
+            purpose_category = first_form_value(form, "purpose_category", "Maintenance").strip()
+            try:
+                with connect() as connection:
+                    save_training_purpose_dimension(
+                        connection,
+                        training_purpose_code,
+                        name_en,
+                        name_zh,
+                        purpose_category,
+                    )
+                    connection.commit()
+                message = "目的庫已儲存"
+            except Exception as exc:
+                message = str(exc)
+            params = {"page": "settings", "message": message}
+            if scroll_y:
+                params["scroll_y"] = scroll_y
+            self.redirect("/?" + urlencode(params))
+            return
+
+        if parsed.path == "/metadata/delete-workout-type":
+            form = parse_qs(body.decode("utf-8"))
+            scroll_y = first_form_value(form, "scroll_y", "").strip()
+            workout_type_code = first_form_value(form, "workout_type_code", "").strip()
+            try:
+                with connect() as connection:
+                    detached = delete_workout_type_dimension(connection, workout_type_code)
+                    connection.commit()
+                message = f"已刪除課表，並解除 {detached} 筆活動的對應"
+            except Exception as exc:
+                message = str(exc)
+            params = {"page": "settings", "message": message}
+            if scroll_y:
+                params["scroll_y"] = scroll_y
+            self.redirect("/?" + urlencode(params))
+            return
+
+        if parsed.path == "/metadata/delete-training-purpose":
+            form = parse_qs(body.decode("utf-8"))
+            scroll_y = first_form_value(form, "scroll_y", "").strip()
+            training_purpose_code = first_form_value(form, "training_purpose_code", "").strip()
+            try:
+                with connect() as connection:
+                    detached = delete_training_purpose_dimension(connection, training_purpose_code)
+                    connection.commit()
+                message = f"已刪除目的，並解除 {detached} 筆活動的對應"
+            except Exception as exc:
+                message = str(exc)
+            params = {"page": "settings", "message": message}
+            if scroll_y:
+                params["scroll_y"] = scroll_y
+            self.redirect("/?" + urlencode(params))
+            return
+
+        if parsed.path == "/settings/feedback-dictionary-option":
+            form = parse_qs(body.decode("utf-8"))
+            scroll_y = first_form_value(form, "scroll_y", "").strip()
+            dictionary_key = first_form_value(form, "dictionary_key", "").strip()
+            action = first_form_value(form, "action", "create").strip()
+            label = first_form_value(form, "label", "").strip()
+            option_id = first_form_value(form, "option_id", "").strip()
+
+            with connect() as connection:
+                if action == "delete":
+                    delete_feedback_dictionary_option(connection, dictionary_key, option_id)
+                    message = "項目已刪除"
+                else:
+                    saved_id = save_feedback_dictionary_option(
+                        connection,
+                        dictionary_key,
+                        label,
+                        option_id if action == "update" else None,
+                    )
+                    message = "項目已儲存"
+                ensure_feedback_dictionary_options(connection, load_metadata_dropdown_options(connection))
+                connection.commit()
+
+            params = {
+                "page": "settings",
+                "message": message,
+            }
+            if scroll_y:
+                params["scroll_y"] = scroll_y
+            self.redirect("/?" + urlencode(params))
             return
 
         self.send_html(render_dashboard(page="metadata", message="Unsupported action"), status=400)

@@ -32,6 +32,8 @@ CoachOS 現在主要提供四個產品面：
 
 `Journey` 目前保留在程式裡，但暫時不作為公開產品面。
 
+CoachOS optimizes for understanding, not information density.
+
 ---
 
 ## AI 回覆與圖檔

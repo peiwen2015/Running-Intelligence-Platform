@@ -26,8 +26,8 @@ from openpyxl import load_workbook
 from fit_to_excel import (
     APP_VERSION,
     DEFAULT_OUTPUT_DIR,
-    DROPDOWN_CONFIG_PATH,
     WORKBOOK_VERSION_NAME,
+    bootstrap_sqlite_state,
     create_workbook,
     default_output_path,
     load_dropdown_options,
@@ -52,13 +52,6 @@ DOWNLOAD_JOBS = {}
 DOWNLOAD_JOBS_LOCK = threading.Lock()
 BATCH_JOBS = {}
 BATCH_JOBS_LOCK = threading.Lock()
-OPTION_FIELDS = [
-    ("shoes", "鞋款"),
-    ("workout_types", "課表類型"),
-    ("training_focus", "訓練目的"),
-    ("garmin_rpe", "感受難度"),
-    ("garmin_feel", "感覺如何"),
-]
 ACTIVITY_INFO_FIELDS = [
     ("activity_name", "活動名稱", "text", "活動名稱"),
     ("shoe", "鞋款", "select", "鞋款"),
@@ -81,21 +74,6 @@ ACTIVITY_INFO_FIELDS = [
     ("recovery_time_hr", "Recovery Time (hr)", "number", "Recovery Time (hr)"),
 ]
 WORKOUT_FOCUS_MAP_KEY = "workout_focus_map"
-DEFAULT_WORKOUT_FOCUS_HINTS = {
-    "Recovery": ["Recovery"],
-    "Easy": ["Aerobic Base"],
-    "LSD": ["Endurance"],
-    "Long Run": ["Endurance"],
-    "Progression": ["Endurance"],
-    "Tempo": ["Threshold"],
-    "Marathon Pace": ["Marathon Pace"],
-    "Interval": ["VO₂max"],
-    "Repetition": ["Speed"],
-    "Hill": ["Running Economy"],
-    "Race": ["Race Simulation", "Test"],
-    "Test": ["Race Simulation", "Test"],
-    "Fartlek": ["Speed", "VO₂max"],
-}
 
 
 def open_file(path):
@@ -147,15 +125,6 @@ def cell_map(ws):
     return {ws.cell(row, 1).value: ws.cell(row, 2).value for row in range(1, ws.max_row + 1)}
 
 
-def load_raw_config():
-    if not DROPDOWN_CONFIG_PATH.exists():
-        return {}
-    try:
-        return json.loads(DROPDOWN_CONFIG_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
 def load_garmin_config():
     if not GARMIN_CONFIG_PATH.exists():
         return {"email": ""}
@@ -184,52 +153,6 @@ def remove_garmin_config():
         pass
 
 
-def matching_option(options, hint):
-    hint = hint.lower()
-    for option in options:
-        if hint in str(option).lower():
-            return option
-    return None
-
-
-def default_workout_focus_map(options):
-    result = {}
-    training_focus = options.get("training_focus", [])
-    for workout in options.get("workout_types", []):
-        matched_focus = []
-        for workout_hint, focus_hints in DEFAULT_WORKOUT_FOCUS_HINTS.items():
-            if workout_hint.lower() not in str(workout).lower():
-                continue
-            for focus_hint in focus_hints:
-                focus = matching_option(training_focus, focus_hint)
-                if focus and focus not in matched_focus:
-                    matched_focus.append(focus)
-            break
-        result[workout] = matched_focus
-    return result
-
-
-def clean_workout_focus_map(raw_map, options):
-    workout_types = options.get("workout_types", [])
-    training_focus = set(options.get("training_focus", []))
-    result = {}
-    if isinstance(raw_map, dict):
-        for workout in workout_types:
-            values = raw_map.get(workout, [])
-            if isinstance(values, str):
-                values = [values]
-            if isinstance(values, list):
-                result[workout] = [
-                    str(value).strip()
-                    for value in values
-                    if str(value).strip() in training_focus
-                ]
-    defaults = default_workout_focus_map(options)
-    for workout in workout_types:
-        result.setdefault(workout, defaults.get(workout, []))
-    return result
-
-
 def shoe_label_from_row(row):
     model = str(row["model"] or "").strip()
     nickname = str(row["nickname"] or "").strip()
@@ -242,51 +165,12 @@ def shoe_label_from_row(row):
     return str(row["shoe_code"] or "").strip()
 
 
-def shoe_labels_from_sqlite():
-    if not SQLITE_DB_PATH.exists():
-        return []
-    try:
-        connection = sqlite3.connect(SQLITE_DB_PATH)
-        connection.row_factory = sqlite3.Row
-        rows = connection.execute(
-            """
-            SELECT shoe_code, model, nickname, is_active
-            FROM shoe
-            ORDER BY is_active DESC, model, nickname, shoe_code
-            """
-        ).fetchall()
-    except sqlite3.DatabaseError:
-        return []
-    finally:
-        try:
-            connection.close()
-        except Exception:
-            pass
-
-    labels = []
-    seen = set()
-    for row in rows:
-        label = shoe_label_from_row(row)
-        key = label.lower()
-        if not label or key in seen:
-            continue
-        seen.add(key)
-        labels.append(label)
-    return labels
-
-
 def load_app_options():
-    options = load_dropdown_options(DROPDOWN_CONFIG_PATH)
-    raw = load_raw_config()
-    if not raw.get("shoes"):
-        sqlite_shoes = shoe_labels_from_sqlite()
-        if sqlite_shoes:
-            options["shoes"] = sqlite_shoes
-            updated = dict(raw)
-            updated["shoes"] = sqlite_shoes
-            save_dropdown_options(updated)
-    options[WORKOUT_FOCUS_MAP_KEY] = clean_workout_focus_map(raw.get(WORKOUT_FOCUS_MAP_KEY), options)
-    return options
+    return load_dropdown_options()
+
+
+def initialize_app_state():
+    bootstrap_sqlite_state(SQLITE_DB_PATH)
 
 
 def workbook_summary(path):
@@ -1081,6 +965,11 @@ def save_uploaded_fit(upload):
 
 
 def build_metadata(form):
+    primary_focus = first_value(form, "training_focus_primary")
+    secondary_focus = first_value(form, "training_focus_secondary")
+    focus_values = [value for value in (primary_focus, secondary_focus) if value]
+    if not focus_values:
+        focus_values = selected_values(form, "training_focus")
     return {
         "activity_name": first_value(form, "activity_name"),
         "shoe": first_value(form, "shoe"),
@@ -1090,7 +979,7 @@ def build_metadata(form):
         "wind_speed": first_value(form, "wind_speed"),
         "weather_description": first_value(form, "weather_description"),
         "workout_type": first_value(form, "workout_type"),
-        "training_focus": "、".join(selected_values(form, "training_focus")),
+        "training_focus": "、".join(dict.fromkeys(focus_values)),
         "feel": first_value(form, "feel"),
         "rpe": first_value(form, "rpe"),
         "fueling": first_value(form, "fueling"),
@@ -1104,22 +993,31 @@ def build_metadata(form):
     }
 
 
-def option_tags(options, selected=""):
+def option_display_label(option, labels=None):
+    value = str(option)
+    if labels and value in labels:
+        return str(labels[value])
+    return value
+
+
+def option_tags(options, selected="", labels=None):
     tags = ['<option value="">自動 / 留空</option>']
     for option in options:
         value = html.escape(str(option), quote=True)
         is_selected = " selected" if str(option) == selected else ""
-        tags.append(f'<option value="{value}"{is_selected}>{html.escape(str(option))}</option>')
+        display = html.escape(option_display_label(option, labels))
+        tags.append(f'<option value="{value}"{is_selected}>{display}</option>')
     return "\n".join(tags)
 
 
-def multi_option_tags(options, selected=None):
+def multi_option_tags(options, selected=None, labels=None):
     selected = set(selected or [])
     tags = []
     for option in options:
         value = html.escape(str(option), quote=True)
         is_selected = " selected" if str(option) in selected else ""
-        tags.append(f'<option value="{value}"{is_selected}>{html.escape(str(option))}</option>')
+        display = html.escape(option_display_label(option, labels))
+        tags.append(f'<option value="{value}"{is_selected}>{display}</option>')
     return "\n".join(tags)
 
 
@@ -1133,6 +1031,8 @@ def options_with_existing(options, selected):
 
 def activity_info_form_fields(values, dropdown_options):
     fields = []
+    workout_labels = dropdown_options.get("workout_type_labels", {})
+    purpose_labels = dropdown_options.get("training_focus_labels", {})
     select_options = {
         "shoe": dropdown_options["shoes"],
         "workout_type": dropdown_options["workout_types"],
@@ -1147,7 +1047,7 @@ def activity_info_form_fields(values, dropdown_options):
                 f"""
                 <label>
                   <span>{html.escape(display)}</span>
-                  <select name="{html.escape(key)}">{option_tags(options, str(value))}</select>
+                  <select name="{html.escape(key)}">{option_tags(options, str(value), workout_labels if key == "workout_type" else None)}</select>
                 </label>
                 """
             )
@@ -1158,7 +1058,7 @@ def activity_info_form_fields(values, dropdown_options):
                 f"""
                 <label>
                   <span>{html.escape(display)}</span>
-                  <select name="{html.escape(key)}" multiple>{multi_option_tags(options, selected)}</select>
+                  <select name="{html.escape(key)}" multiple>{multi_option_tags(options, selected, purpose_labels)}</select>
                 </label>
                 """
             )
@@ -1187,15 +1087,17 @@ def input_field(label, name, value="", input_type="text", placeholder=""):
 
 def workout_focus_reference_table(dropdown_options):
     mapping = dropdown_options.get(WORKOUT_FOCUS_MAP_KEY, {})
+    workout_labels = dropdown_options.get("workout_type_labels", {})
+    purpose_labels = dropdown_options.get("training_focus_labels", {})
     rows = []
     for workout in dropdown_options["workout_types"]:
         focus_matches = mapping.get(workout, [])
-        focus_label = "、".join(focus_matches) if focus_matches else "未設定"
+        focus_label = "、".join(option_display_label(focus, purpose_labels) for focus in focus_matches) if focus_matches else "未設定"
         focus_data = "||".join(focus_matches)
         rows.append(
             f"""
             <tr>
-              <td>{html.escape(workout)}</td>
+              <td>{html.escape(option_display_label(workout, workout_labels))}</td>
               <td>{html.escape(focus_label)}</td>
               <td>
                 <button class="small-button" type="button" data-workout-value="{html.escape(workout, quote=True)}" data-focus-values="{html.escape(focus_data, quote=True)}">套用</button>
@@ -1254,13 +1156,11 @@ def nav(active="convert"):
     convert_class = " active" if active == "convert" else ""
     download_class = " active" if active == "download-fit" else ""
     batch_class = " active" if active == "batch" else ""
-    options_class = " active" if active == "options" else ""
     return f"""
       <nav>
         <a class="nav-link{convert_class}" href="/">轉檔</a>
         <a class="nav-link{download_class}" href="/download-fit">下載 FIT</a>
         <a class="nav-link{batch_class}" href="/batch-convert">批次轉檔</a>
-        <a class="nav-link{options_class}" href="/options">下拉選單設定</a>
         <a class="nav-link nav-link-secondary" href="{html.escape(PLATFORM_URL, quote=True)}">回分析平台</a>
       </nav>
     """
@@ -1726,6 +1626,15 @@ def base_styles():
 
 def render_page(message="", error="", selected_fit=""):
     dropdown_options = load_app_options()
+    workout_labels = dropdown_options.get("workout_type_labels", {})
+    purpose_labels = dropdown_options.get("training_focus_labels", {})
+    workout_map_json = json.dumps(
+        {
+            workout: "||".join(dropdown_options.get(WORKOUT_FOCUS_MAP_KEY, {}).get(workout, []))
+            for workout in dropdown_options["workout_types"]
+        },
+        ensure_ascii=False,
+    )
     files, total_count, list_limit = fit_files(selected_fit)
     fit_options = []
     for path in files:
@@ -1789,12 +1698,17 @@ def render_page(message="", error="", selected_fit=""):
           </label>
           <label>
             <span>課表類型</span>
-            <select name="workout_type">{option_tags(dropdown_options["workout_types"])}</select>
+            <select name="workout_type">{option_tags(dropdown_options["workout_types"], labels=workout_labels)}</select>
           </label>
           <label>
-            <span>訓練目的</span>
-            <select name="training_focus" multiple>{multi_option_tags(dropdown_options["training_focus"])}</select>
-            <p class="note">可多選；macOS 按 Command，Windows 按 Ctrl。</p>
+            <span>主目的</span>
+            <select name="training_focus_primary">{option_tags(dropdown_options["training_focus"], labels=purpose_labels)}</select>
+            <p class="note">課表切換時會自動帶入主要訓練目的。</p>
+          </label>
+          <label>
+            <span>副目的</span>
+            <select name="training_focus_secondary">{option_tags(dropdown_options["training_focus"], labels=purpose_labels)}</select>
+            <p class="note">若這堂課有第二層意圖，會一起自動帶入。</p>
           </label>
           <label>
             <span>感覺如何</span>
@@ -1832,7 +1746,7 @@ def render_page(message="", error="", selected_fit=""):
       </div>
     </form>
   </main>
-  <script>
+    <script>
     function chooseOption(select, optionValue, allowMultiple) {{
       if (!select || !optionValue) return;
       for (const option of select.options) {{
@@ -1847,17 +1761,42 @@ def render_page(message="", error="", selected_fit=""):
       }}
     }}
 
+    function applyWorkoutFocus(workoutValue, focusValuesRaw) {{
+      const workoutSelect = document.querySelector('select[name="workout_type"]');
+      const primarySelect = document.querySelector('select[name="training_focus_primary"]');
+      const secondarySelect = document.querySelector('select[name="training_focus_secondary"]');
+      if (workoutSelect && workoutValue) {{
+        chooseOption(workoutSelect, workoutValue, false);
+      }}
+      const focusValues = (focusValuesRaw || "").split("||").filter(Boolean);
+      if (primarySelect) {{
+        primarySelect.value = "";
+        if (focusValues[0]) {{
+          chooseOption(primarySelect, focusValues[0], false);
+        }}
+      }}
+      if (secondarySelect) {{
+        secondarySelect.value = "";
+        if (focusValues[1]) {{
+          chooseOption(secondarySelect, focusValues[1], false);
+        }}
+      }}
+    }}
+
     document.querySelectorAll("[data-workout-value]").forEach((button) => {{
       button.addEventListener("click", () => {{
-        const workoutSelect = document.querySelector('select[name="workout_type"]');
-        const focusSelect = document.querySelector('select[name="training_focus"]');
-        chooseOption(workoutSelect, button.dataset.workoutValue, false);
-        if (focusSelect) {{
-          for (const option of focusSelect.options) option.selected = false;
-          button.dataset.focusValues.split("||").forEach((focus) => chooseOption(focusSelect, focus, true));
-        }}
+        applyWorkoutFocus(button.dataset.workoutValue, button.dataset.focusValues);
       }});
     }});
+
+    const workoutSelect = document.querySelector('select[name="workout_type"]');
+    const workoutMap = {workout_map_json};
+    if (workoutSelect) {{
+      workoutSelect.addEventListener("change", () => {{
+        const focusValues = workoutMap[workoutSelect.value] || "";
+        applyWorkoutFocus(workoutSelect.value, focusValues);
+      }});
+    }}
   </script>
 </body>
 </html>"""
@@ -2224,146 +2163,6 @@ def render_edit_excel_page(path, message="", error="", job_id=""):
 </html>"""
 
 
-def options_textarea(name, label, values):
-    text = "\n".join(str(value) for value in values)
-    return f"""
-      <label class="wide">
-        <span>{html.escape(label)}，每行一個選項</span>
-        <textarea class="tall" name="{html.escape(name)}">{html.escape(text)}</textarea>
-      </label>
-    """
-
-
-def mapping_select(name, training_focus, selected):
-    return f"""
-      <select name="{html.escape(name)}" multiple>
-        {multi_option_tags(training_focus, selected)}
-      </select>
-    """
-
-
-def mapping_settings_table(options):
-    rows = []
-    mapping = options.get(WORKOUT_FOCUS_MAP_KEY, {})
-    training_focus = options["training_focus"]
-    for index, workout in enumerate(options["workout_types"]):
-        selected = mapping.get(workout, [])
-        rows.append(
-            f"""
-            <tr>
-              <td>
-                {html.escape(workout)}
-                <input type="hidden" name="map_workout_{index}" value="{html.escape(workout, quote=True)}">
-              </td>
-              <td>{mapping_select(f"map_focus_{index}", training_focus, selected)}</td>
-            </tr>
-            """
-        )
-    return f"""
-      <div class="reference-table-wrap">
-        <table class="reference-table">
-          <thead>
-            <tr>
-              <th>課表類型</th>
-              <th>對應訓練目的</th>
-            </tr>
-          </thead>
-          <tbody>
-            {"".join(rows)}
-          </tbody>
-        </table>
-      </div>
-    """
-
-
-def dropdown_options_from_form(form):
-    result = {}
-    for key, _label in OPTION_FIELDS:
-        lines = [line.strip() for line in first_value(form, key).splitlines()]
-        values = []
-        seen = set()
-        for line in lines:
-            if not line or line in seen:
-                continue
-            values.append(line)
-            seen.add(line)
-        if not values:
-            raise ValueError("每一組下拉選單至少需要一個選項。")
-        result[key] = values
-    result[WORKOUT_FOCUS_MAP_KEY] = workout_focus_map_from_form(form, result)
-    return result
-
-
-def workout_focus_map_from_form(form, options):
-    valid_workouts = set(options["workout_types"])
-    valid_focus = set(options["training_focus"])
-    result = {}
-    for index, workout in enumerate(options["workout_types"]):
-        posted_workout = first_value(form, f"map_workout_{index}") or workout
-        if posted_workout not in valid_workouts:
-            continue
-        selected = [
-            value
-            for value in selected_values(form, f"map_focus_{index}")
-            if value in valid_focus
-        ]
-        result[posted_workout] = selected
-    defaults = default_workout_focus_map(options)
-    for workout in options["workout_types"]:
-        result.setdefault(workout, defaults.get(workout, []))
-    return result
-
-
-def save_dropdown_options(options):
-    CONFIG_DIR = DROPDOWN_CONFIG_PATH.parent
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    DROPDOWN_CONFIG_PATH.write_text(
-        json.dumps(options, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-
-
-def render_options_page(message="", error=""):
-    options = load_app_options()
-    fields = "\n".join(options_textarea(key, label, options[key]) for key, label in OPTION_FIELDS)
-    return f"""<!doctype html>
-<html lang="zh-Hant">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CoachOS - 下拉選單設定</title>
-  <style>
-    {base_styles()}
-  </style>
-</head>
-<body>
-  <main>
-    {product_banner("下拉選單設定")}
-    <p class="subtitle">先修改活動資訊選項並儲存，再設定課表類型與訓練目的的對應關係。儲存後會立即套用到轉檔頁與輸出的 Excel。</p>
-    {nav("options")}
-    {status_html(message, error)}
-    <form method="post" action="/options">
-      <fieldset>
-        <legend>選項內容</legend>
-        <div class="grid">
-          {fields}
-        </div>
-      </fieldset>
-      <fieldset>
-        <legend>課表與訓練目的對應</legend>
-        <p class="note">若剛新增或改名課表/訓練目的，請先儲存選項內容；頁面重新整理後再設定對應關係。</p>
-        {mapping_settings_table(options)}
-      </fieldset>
-      <div class="actions">
-        <button type="submit">儲存設定</button>
-        <a class="button secondary" href="/">回轉檔</a>
-      </div>
-    </form>
-  </main>
-</body>
-</html>"""
-
-
 class AppHandler(BaseHTTPRequestHandler):
     def send_html(self, content, status=200):
         data = content.encode("utf-8")
@@ -2420,7 +2219,9 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_asset(ASSETS_DIR / parsed.path.removeprefix("/assets/"))
             return
         if parsed.path == "/options":
-            self.send_html(render_options_page())
+            self.send_response(302)
+            self.send_header("Location", "/")
+            self.end_headers()
             return
         if parsed.path == "/download-fit":
             self.send_html(render_download_fit_page())
@@ -2554,16 +2355,9 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/options":
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length)
-            form, _files = parse_post_data(self.headers, body)
-            try:
-                options = dropdown_options_from_form(form)
-                save_dropdown_options(options)
-            except Exception as error:
-                self.send_html(render_options_page(error=f"儲存失敗：{error}"), status=400)
-                return
-            self.send_html(render_options_page(message="下拉選單已更新。"))
+            self.send_response(302)
+            self.send_header("Location", "/")
+            self.end_headers()
             return
 
         if parsed.path != "/convert":
@@ -2630,6 +2424,11 @@ def open_browser_later(url):
 
 
 def main():
+    try:
+        initialize_app_state()
+    except Exception as error:
+        print(f"無法初始化 CoachOS 本機資料：{error}")
+        return
     try:
         server = ThreadingHTTPServer((HOST, PORT), AppHandler)
     except PermissionError:

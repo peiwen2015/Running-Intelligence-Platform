@@ -1,14 +1,4 @@
 {
-  "shoes": [
-    "Boston 12",
-    "Boston 13 Blue",
-    "Boston 13 Green",
-    "Clifton 10",
-    "EVO SL",
-    "Nimbus 28",
-    "Rebel v5",
-    "Supernova Rise 2"
-  ],
   "workout_types": [
     "Recovery Run（恢復跑）",
     "Easy Run（輕鬆跑）",

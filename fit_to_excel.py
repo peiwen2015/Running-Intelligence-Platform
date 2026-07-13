@@ -26,7 +26,9 @@ WORKBOOK_VERSION_NAME = "跑步分析資料 v1.1"
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "EXCEL"
 CONFIG_DIR = Path(__file__).resolve().parent / "config"
 DROPDOWN_CONFIG_PATH = CONFIG_DIR / "dropdown_options.json"
+SQLITE_DB_PATH = Path(__file__).resolve().parent / "analysis_platform" / "running_analytics.sqlite"
 SQLITE_SCHEMA_PATH = Path(__file__).resolve().parent / "docs" / "30_Physical_Model" / "SQLite Schema v1.0.sql"
+FEEDBACK_DICTIONARY_SEED_PATH = Path(__file__).resolve().parent / "analysis_platform" / "feedback_dictionary_seed.json"
 STAMINA_RECORD_FIELDS = (137, 138)
 STAMINA_SESSION_START = 205
 STAMINA_SESSION_END_FIELDS = (206, 207)
@@ -80,6 +82,8 @@ DEFAULT_DROPDOWN_OPTIONS = {
     ],
 }
 WEATHER_FIELDS = ("weather_temp", "humidity", "wind_direction", "wind_speed", "weather_description")
+DROPDOWN_SOURCE_TABLE = "dropdown_source"
+FEEDBACK_DICTIONARY_TABLE = "feedback_dictionary_option"
 
 SHOE_DIMENSION_DEFAULTS = {}
 
@@ -299,6 +303,9 @@ def default_output_path(fit_path: Path):
 def load_dropdown_options(path=DROPDOWN_CONFIG_PATH):
     options = {key: list(value) for key, value in DEFAULT_DROPDOWN_OPTIONS.items()}
     options["workout_focus_map"] = {}
+    sqlite_options = load_dropdown_options_from_sqlite(SQLITE_DB_PATH)
+    if sqlite_options:
+        return sqlite_options
     if not path.exists():
         return options
     try:
@@ -308,6 +315,8 @@ def load_dropdown_options(path=DROPDOWN_CONFIG_PATH):
         return options
 
     for key, default_values in DEFAULT_DROPDOWN_OPTIONS.items():
+        if key == "shoes":
+            continue
         values = loaded.get(key)
         if isinstance(values, list):
             cleaned = [str(value).strip() for value in values if str(value).strip()]
@@ -315,6 +324,7 @@ def load_dropdown_options(path=DROPDOWN_CONFIG_PATH):
                 options[key] = cleaned
         if not options.get(key):
             options[key] = list(default_values)
+    options["shoes"] = []
     if isinstance(loaded.get("workout_focus_map"), dict):
         options["workout_focus_map"] = {
             str(key).strip(): [str(item).strip() for item in value if str(item).strip()]
@@ -322,6 +332,156 @@ def load_dropdown_options(path=DROPDOWN_CONFIG_PATH):
             if str(key).strip() and isinstance(value, list)
         }
     return options
+
+
+def load_dropdown_options_from_sqlite(db_path):
+    if not db_path.exists():
+        return None
+    try:
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+    except sqlite3.DatabaseError:
+        return None
+    try:
+        options = {key: list(value) for key, value in DEFAULT_DROPDOWN_OPTIONS.items()}
+        options["workout_focus_map"] = {}
+
+        shoe_rows = connection.execute(
+            """
+            SELECT shoe_code, model, nickname, is_active
+            FROM shoe
+            ORDER BY is_active DESC, model, nickname, shoe_code
+            """
+        ).fetchall()
+        shoes = []
+        seen_shoes = set()
+        for row in shoe_rows:
+            model = str(row["model"] or "").strip()
+            nickname = str(row["nickname"] or "").strip()
+            if model and nickname:
+                label = f"{model} {nickname}".strip()
+            elif model:
+                label = model
+            elif nickname:
+                label = nickname
+            else:
+                label = str(row["shoe_code"] or "").strip()
+            key = label.lower()
+            if not label or key in seen_shoes:
+                continue
+            seen_shoes.add(key)
+            shoes.append(label)
+        if shoes:
+            options["shoes"] = shoes
+
+        workout_rows = connection.execute(
+            """
+            SELECT name_en, name_zh
+            FROM workout_type
+            ORDER BY COALESCE(sort_order, 9999), name_en
+            """
+        ).fetchall()
+        workout_types = [str(row["name_en"]).strip() for row in workout_rows if str(row["name_en"] or "").strip()]
+        options["workout_type_labels"] = {
+            str(row["name_en"]).strip(): str(row["name_zh"] or row["name_en"]).strip()
+            for row in workout_rows
+            if str(row["name_en"] or "").strip()
+        }
+        if workout_types:
+            options["workout_types"] = workout_types
+
+        purpose_rows = connection.execute(
+            """
+            SELECT name_en, name_zh
+            FROM training_purpose
+            ORDER BY COALESCE(sort_order, 9999), name_en
+            """
+        ).fetchall()
+        training_focus = [str(row["name_en"]).strip() for row in purpose_rows if str(row["name_en"] or "").strip()]
+        options["training_focus_labels"] = {
+            str(row["name_en"]).strip(): str(row["name_zh"] or row["name_en"]).strip()
+            for row in purpose_rows
+            if str(row["name_en"] or "").strip()
+        }
+        if training_focus:
+            options["training_focus"] = training_focus
+
+        feedback_rows = connection.execute(
+            """
+            SELECT dictionary_key, label
+            FROM feedback_dictionary_option
+            ORDER BY dictionary_key, id
+            """
+        ).fetchall()
+        feedback_groups = {}
+        for row in feedback_rows:
+            key = str(row["dictionary_key"] or "").strip()
+            label = str(row["label"] or "").strip()
+            if not key or not label:
+                continue
+            feedback_groups.setdefault(key, []).append(label)
+        for key in ("garmin_rpe", "garmin_feel"):
+            if feedback_groups.get(key):
+                options[key] = feedback_groups[key]
+
+        map_rows = connection.execute(
+            """
+            SELECT
+                wt.name_en AS workout_name,
+                primary_purpose.name_en AS primary_name,
+                secondary_purpose.name_en AS secondary_name
+            FROM workout_type wt
+            LEFT JOIN workout_type_training_purpose_map map
+                ON map.workout_type_id = wt.id
+            LEFT JOIN training_purpose primary_purpose
+                ON primary_purpose.id = map.primary_training_purpose_id
+            LEFT JOIN training_purpose secondary_purpose
+                ON secondary_purpose.id = map.secondary_training_purpose_id
+            ORDER BY COALESCE(wt.sort_order, 9999), wt.name_en
+            """
+        ).fetchall()
+        workout_focus_map = {}
+        for row in map_rows:
+            workout_name = str(row["workout_name"] or "").strip()
+            if not workout_name:
+                continue
+            purposes = []
+            for purpose_name in (row["primary_name"], row["secondary_name"]):
+                label = str(purpose_name or "").strip()
+                if label and label not in purposes:
+                    purposes.append(label)
+            workout_focus_map[workout_name] = purposes
+        if workout_focus_map:
+            options["workout_focus_map"] = workout_focus_map
+
+        return options
+    except sqlite3.DatabaseError:
+        return None
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+
+def load_feedback_dictionary_seed():
+    defaults = {
+        "garmin_rpe": list(DEFAULT_DROPDOWN_OPTIONS["garmin_rpe"]),
+        "garmin_feel": list(DEFAULT_DROPDOWN_OPTIONS["garmin_feel"]),
+    }
+    if not FEEDBACK_DICTIONARY_SEED_PATH.exists():
+        return defaults
+    try:
+        loaded = json.loads(FEEDBACK_DICTIONARY_SEED_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return defaults
+    for key in ("garmin_rpe", "garmin_feel"):
+        values = loaded.get(key)
+        if isinstance(values, list):
+            cleaned = [str(value).strip() for value in values if str(value).strip()]
+            if cleaned:
+                defaults[key] = cleaned
+    return defaults
 
 
 def label_primary(value):
@@ -1520,6 +1680,129 @@ def ensure_sqlite_schema(connection, schema_path=SQLITE_SCHEMA_PATH):
     connection.executescript(schema_path.read_text(encoding="utf-8"))
 
 
+def ensure_dropdown_source_table(connection, dropdown_options):
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {DROPDOWN_SOURCE_TABLE} (
+            source_key TEXT PRIMARY KEY,
+            source_json TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    payloads = {
+        "shoes": dropdown_options.get("shoes", []),
+        "workout_types": dropdown_options.get("workout_types", []),
+        "training_focus": dropdown_options.get("training_focus", []),
+        "garmin_rpe": dropdown_options.get("garmin_rpe", []),
+        "garmin_feel": dropdown_options.get("garmin_feel", []),
+        "workout_focus_map": dropdown_options.get("workout_focus_map", {}),
+    }
+    for source_key, value in payloads.items():
+        existing = connection.execute(
+            f"SELECT source_json FROM {DROPDOWN_SOURCE_TABLE} WHERE source_key = ?",
+            (source_key,),
+        ).fetchone()
+        if existing:
+            continue
+        connection.execute(
+            f"""
+            INSERT INTO {DROPDOWN_SOURCE_TABLE} (source_key, source_json, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            """,
+            (source_key, json.dumps(value, ensure_ascii=False)),
+        )
+
+
+def ensure_feedback_dictionary_table(connection, dropdown_options):
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {FEEDBACK_DICTIONARY_TABLE} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dictionary_key TEXT NOT NULL,
+            label TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(dictionary_key, label)
+        )
+        """
+    )
+    seeds = load_feedback_dictionary_seed()
+    for dictionary_key in ("garmin_rpe", "garmin_feel"):
+        existing_count = connection.execute(
+            f"SELECT COUNT(*) FROM {FEEDBACK_DICTIONARY_TABLE} WHERE dictionary_key = ?",
+            (dictionary_key,),
+        ).fetchone()[0]
+        if existing_count:
+            continue
+        values = dropdown_options.get(dictionary_key) or seeds.get(dictionary_key, [])
+        for label in values:
+            value = str(label or "").strip()
+            if not value:
+                continue
+            connection.execute(
+                f"""
+                INSERT INTO {FEEDBACK_DICTIONARY_TABLE} (dictionary_key, label, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                """,
+                (dictionary_key, value),
+            )
+
+
+def ensure_workout_purpose_map_table(connection, dropdown_options):
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS workout_type_training_purpose_map (
+            workout_type_id INTEGER PRIMARY KEY,
+            primary_training_purpose_id INTEGER,
+            secondary_training_purpose_id INTEGER,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (workout_type_id) REFERENCES workout_type(id),
+            FOREIGN KEY (primary_training_purpose_id) REFERENCES training_purpose(id),
+            FOREIGN KEY (secondary_training_purpose_id) REFERENCES training_purpose(id)
+        )
+        """
+    )
+    existing_count = connection.execute(
+        "SELECT COUNT(*) FROM workout_type_training_purpose_map"
+    ).fetchone()[0]
+    if existing_count:
+        return
+    focus_map = dropdown_options.get("workout_focus_map", {})
+    for workout_label in dropdown_options.get("workout_types", []):
+        workout_row = workout_type_dimension_row(workout_label)
+        workout_type_id = upsert_dimension(connection, "workout_type", "workout_type_code", workout_row)
+        purpose_labels = focus_map.get(workout_label, [])
+        if not purpose_labels:
+            continue
+        primary_id = None
+        secondary_id = None
+        if len(purpose_labels) >= 1:
+            primary_id = upsert_dimension(
+                connection,
+                "training_purpose",
+                "training_purpose_code",
+                training_purpose_dimension_row(purpose_labels[0]),
+            )
+        if len(purpose_labels) >= 2:
+            secondary_id = upsert_dimension(
+                connection,
+                "training_purpose",
+                "training_purpose_code",
+                training_purpose_dimension_row(purpose_labels[1]),
+            )
+        connection.execute(
+            """
+            INSERT INTO workout_type_training_purpose_map (
+                workout_type_id,
+                primary_training_purpose_id,
+                secondary_training_purpose_id,
+                updated_at
+            ) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (workout_type_id, primary_id, secondary_id),
+        )
+
+
 def upsert_dimension(connection, table, code_column, row):
     existing = connection.execute(
         f"SELECT id FROM {table} WHERE {code_column} = ?",
@@ -1557,6 +1840,18 @@ def seed_reference_data(connection, dropdown_options):
         upsert_dimension(connection, "training_purpose", "training_purpose_code", training_purpose_dimension_row(label))
 
 
+def bootstrap_sqlite_state(db_path=SQLITE_DB_PATH, dropdown_options=None):
+    options = dropdown_options or load_dropdown_options(DROPDOWN_CONFIG_PATH)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as connection:
+        ensure_sqlite_schema(connection)
+        seed_reference_data(connection, options)
+        ensure_dropdown_source_table(connection, options)
+        ensure_feedback_dictionary_table(connection, options)
+        ensure_workout_purpose_map_table(connection, options)
+    return db_path
+
+
 def resolve_shoe_id(connection, metadata):
     label = null_if_blank(metadata.get("shoe"))
     if not label:
@@ -1574,7 +1869,15 @@ def resolve_workout_type_id(connection, metadata):
 def metadata_training_focus_values(metadata, dropdown_options):
     focus = null_if_blank(metadata.get("training_focus"))
     if focus:
-        return [focus]
+        values = []
+        seen = set()
+        for value in re.split(r"[、,;/\n]+", focus):
+            label = str(value or "").strip()
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            values.append(label)
+        return values
     workout_type = null_if_blank(metadata.get("workout_type"))
     if not workout_type:
         return []
@@ -1650,10 +1953,8 @@ def write_fit_to_sqlite(fit_path: Path, db_path: Path, metadata=None, fetch_weat
     activity_row = sqlite_activity_row(fit_path, messages, session, rows, metadata)
     split_rows = sqlite_split_rows(messages)
 
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    bootstrap_sqlite_state(db_path, dropdown_options)
     with sqlite3.connect(db_path) as connection:
-        ensure_sqlite_schema(connection)
-        seed_reference_data(connection, dropdown_options)
         activity_row["shoe_id"] = resolve_shoe_id(connection, metadata)
         activity_row["workout_type_id"] = resolve_workout_type_id(connection, metadata)
         activity_id = upsert_activity(connection, activity_row)
