@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import webbrowser
+from collections import Counter
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,6 +54,16 @@ PORT = 8766
 DB_PATH = DEFAULT_DB_PATH
 DROPDOWN_SOURCE_TABLE = "dropdown_source"
 FEEDBACK_DICTIONARY_TABLE = "feedback_dictionary_option"
+
+ACTIVITY_METADATA_PROVENANCE_TABLE = "activity_metadata_provenance"
+LEGACY_SHOE_FILL_CUTOFF = "2026-07-10T00:00:00"
+
+ACTIVITY_METADATA_PROVENANCE_LABELS = {
+    "manual": "你手動標的",
+    "coach_knowledge": "CoachOS 學會的",
+    "coach_memory_auto_fill": "CoachOS 先前補的",
+    "legacy_unknown": "來源待確認",
+}
 
 FEEDBACK_DICTIONARY_LABELS = {
     "garmin_rpe": "感受難度",
@@ -744,6 +755,9 @@ def connect():
     ensure_semantic_layer(connection)
     ensure_dropdown_sources(connection)
     ensure_workout_purpose_map(connection)
+    ensure_coach_knowledge_shoe_memory(connection)
+    ensure_activity_metadata_provenance(connection)
+    connection.commit()
     return connection
 
 
@@ -1390,6 +1404,313 @@ def ensure_workout_purpose_map(connection):
         )
 
 
+def ensure_coach_knowledge_shoe_memory(connection):
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS coach_knowledge_shoe_memory (
+            workout_type_id INTEGER NOT NULL,
+            primary_training_purpose_id INTEGER NOT NULL,
+            shoe_id INTEGER NOT NULL,
+            confirmation_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (workout_type_id, primary_training_purpose_id, shoe_id),
+            FOREIGN KEY (workout_type_id) REFERENCES workout_type(id) ON DELETE CASCADE,
+            FOREIGN KEY (primary_training_purpose_id) REFERENCES training_purpose(id) ON DELETE CASCADE,
+            FOREIGN KEY (shoe_id) REFERENCES shoe(id) ON DELETE CASCADE
+        )
+        """
+    )
+    existing = connection.execute(
+        "SELECT COUNT(*) AS count FROM coach_knowledge_shoe_memory"
+    ).fetchone()["count"]
+    if existing:
+        return
+    connection.execute(
+        """
+        INSERT INTO coach_knowledge_shoe_memory (
+            workout_type_id,
+            primary_training_purpose_id,
+            shoe_id,
+            confirmation_count,
+            created_at,
+            updated_at
+        )
+        SELECT
+            workout_type_id,
+            primary_training_purpose_id,
+            shoe_id,
+            COUNT(*) AS confirmation_count,
+            CURRENT_TIMESTAMP,
+            CURRENT_TIMESTAMP
+        FROM activity_review_view
+        WHERE shoe_id IS NOT NULL
+          AND workout_type_id IS NOT NULL
+          AND primary_training_purpose_id IS NOT NULL
+        GROUP BY workout_type_id, primary_training_purpose_id, shoe_id
+        """
+    )
+
+
+def ensure_activity_metadata_provenance(connection):
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ACTIVITY_METADATA_PROVENANCE_TABLE} (
+            activity_id INTEGER NOT NULL REFERENCES activity(id) ON DELETE CASCADE,
+            field_name TEXT NOT NULL CHECK (field_name IN ('shoe', 'workout_type', 'primary_purpose', 'secondary_purpose')),
+            source TEXT NOT NULL,
+            source_detail TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (activity_id, field_name)
+        )
+        """
+    )
+    existing = connection.execute(
+        f"SELECT COUNT(*) AS count FROM {ACTIVITY_METADATA_PROVENANCE_TABLE}"
+    ).fetchone()["count"]
+    if existing:
+        return
+
+    legacy_rows = connection.execute(
+        """
+        SELECT
+            activity.id AS activity_id,
+            activity.activity_start_time,
+            activity.updated_at,
+            review.shoe_id,
+            review.workout_type_id,
+            review.primary_training_purpose_id
+        FROM activity
+        JOIN activity_review_view AS review
+            ON review.activity_id = activity.id
+        """
+    ).fetchall()
+    for row in legacy_rows:
+        activity_start_time = str(row["activity_start_time"] or "")
+        updated_at = str(row["updated_at"] or "")
+        likely_auto_fill = (
+            row["shoe_id"] is not None
+            and activity_start_time
+            and updated_at
+            and activity_start_time < LEGACY_SHOE_FILL_CUTOFF
+            and updated_at >= LEGACY_SHOE_FILL_CUTOFF
+        )
+
+        if row["shoe_id"] is not None:
+            connection.execute(
+                f"""
+                INSERT INTO {ACTIVITY_METADATA_PROVENANCE_TABLE} (
+                    activity_id,
+                    field_name,
+                    source,
+                    source_detail,
+                    created_at,
+                    updated_at
+                ) VALUES (?, 'shoe', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (
+                    row["activity_id"],
+                    "coach_memory_auto_fill" if likely_auto_fill else "legacy_unknown",
+                    "Heuristic backfill from legacy shoe updates." if likely_auto_fill else "Historical source not recorded.",
+                ),
+            )
+        if row["workout_type_id"] is not None:
+            connection.execute(
+                f"""
+                INSERT INTO {ACTIVITY_METADATA_PROVENANCE_TABLE} (
+                    activity_id,
+                    field_name,
+                    source,
+                    source_detail,
+                    created_at,
+                    updated_at
+                ) VALUES (?, 'workout_type', 'legacy_unknown', 'Historical source not recorded.', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (row["activity_id"],),
+            )
+        if row["primary_training_purpose_id"] is not None:
+            connection.execute(
+                f"""
+                INSERT INTO {ACTIVITY_METADATA_PROVENANCE_TABLE} (
+                    activity_id,
+                    field_name,
+                    source,
+                    source_detail,
+                    created_at,
+                    updated_at
+                ) VALUES (?, 'primary_purpose', 'legacy_unknown', 'Historical source not recorded.', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (row["activity_id"],),
+            )
+
+
+def activity_metadata_provenance_map(connection, activity_id):
+    if not activity_id:
+        return {}
+    rows = connection.execute(
+        f"""
+        SELECT
+            field_name,
+            source,
+            source_detail,
+            updated_at
+        FROM {ACTIVITY_METADATA_PROVENANCE_TABLE}
+        WHERE activity_id = ?
+        """,
+        (activity_id,),
+    ).fetchall()
+    return {
+        row["field_name"]: {
+            "source": row["source"],
+            "source_detail": row["source_detail"],
+            "updated_at": row["updated_at"],
+        }
+        for row in rows
+    }
+
+
+def record_activity_metadata_provenance(connection, activity_id, field_name, source, source_detail=""):
+    if not activity_id or not field_name:
+        return
+    source_value = str(source or "").strip()
+    if not source_value:
+        return
+    ensure_activity_metadata_provenance(connection)
+    connection.execute(
+        f"""
+        INSERT INTO {ACTIVITY_METADATA_PROVENANCE_TABLE} (
+            activity_id,
+            field_name,
+            source,
+            source_detail,
+            created_at,
+            updated_at
+        ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(activity_id, field_name) DO UPDATE SET
+            source = excluded.source,
+            source_detail = excluded.source_detail,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (activity_id, field_name, source_value, source_detail or None),
+    )
+
+
+def clear_activity_metadata_provenance(connection, activity_id, field_name):
+    if not activity_id or not field_name:
+        return
+    connection.execute(
+        f"DELETE FROM {ACTIVITY_METADATA_PROVENANCE_TABLE} WHERE activity_id = ? AND field_name = ?",
+        (activity_id, field_name),
+    )
+
+
+def provenance_source_label(source):
+    return ACTIVITY_METADATA_PROVENANCE_LABELS.get(str(source or "").strip(), "來源待確認")
+
+
+def coach_knowledge_shoe_memory_row(connection, workout_type_id, primary_purpose_id):
+    if workout_type_id is None or primary_purpose_id is None:
+        return None
+    return connection.execute(
+        """
+        SELECT
+            coach_knowledge_shoe_memory.shoe_id,
+            coach_knowledge_shoe_memory.confirmation_count,
+            coach_knowledge_shoe_memory.updated_at,
+            shoe.shoe_code,
+            shoe.brand,
+            shoe.model,
+            shoe.nickname
+        FROM coach_knowledge_shoe_memory
+        JOIN shoe ON shoe.id = coach_knowledge_shoe_memory.shoe_id
+        WHERE coach_knowledge_shoe_memory.workout_type_id = ?
+          AND coach_knowledge_shoe_memory.primary_training_purpose_id = ?
+        ORDER BY coach_knowledge_shoe_memory.confirmation_count DESC,
+                 coach_knowledge_shoe_memory.updated_at DESC,
+                 coach_knowledge_shoe_memory.shoe_id
+        LIMIT 1
+        """,
+        (workout_type_id, primary_purpose_id),
+    ).fetchone()
+
+
+def record_coach_knowledge_shoe_memory(connection, activity_id):
+    row = connection.execute(
+        """
+        SELECT
+            activity_id,
+            shoe_id,
+            workout_type_id,
+            primary_training_purpose_id
+        FROM activity_review_view
+        WHERE activity_id = ?
+        """,
+        (activity_id,),
+    ).fetchone()
+    if not row:
+        return False
+    if row["shoe_id"] is None or row["workout_type_id"] is None or row["primary_training_purpose_id"] is None:
+        return False
+    ensure_coach_knowledge_shoe_memory(connection)
+    connection.execute(
+        """
+        INSERT INTO coach_knowledge_shoe_memory (
+            workout_type_id,
+            primary_training_purpose_id,
+            shoe_id,
+            confirmation_count,
+            created_at,
+            updated_at
+        ) VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(workout_type_id, primary_training_purpose_id, shoe_id)
+        DO UPDATE SET
+            confirmation_count = confirmation_count + 1,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (row["workout_type_id"], row["primary_training_purpose_id"], row["shoe_id"]),
+    )
+    return True
+
+
+def apply_coach_knowledge_shoe_memory(connection):
+    ensure_coach_knowledge_shoe_memory(connection)
+    missing_rows = connection.execute(
+        """
+        SELECT
+            activity_id,
+            workout_type_id,
+            primary_training_purpose_id
+        FROM activity_review_view
+        WHERE shoe_id IS NULL
+          AND workout_type_id IS NOT NULL
+          AND primary_training_purpose_id IS NOT NULL
+        ORDER BY activity_start_time DESC
+        """
+    ).fetchall()
+    changed = 0
+    for row in missing_rows:
+        memory_row = coach_knowledge_shoe_memory_row(
+            connection,
+            row["workout_type_id"],
+            row["primary_training_purpose_id"],
+        )
+        if not memory_row:
+            continue
+        result = connection.execute(
+            """
+            UPDATE activity
+            SET shoe_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND shoe_id IS NULL
+            """,
+            (memory_row["shoe_id"], row["activity_id"]),
+        )
+        changed += int(result.rowcount or 0)
+    return changed
+
+
 def save_workout_purpose_mapping(connection, workout_type_code, primary_purpose_code, secondary_purpose_code):
     ensure_workout_purpose_map(connection)
     workout_type_id = dimension_id_by_code(connection, "workout_type", "workout_type_code", workout_type_code)
@@ -1777,6 +2098,7 @@ def update_single_activity_metadata(
     workout_type_code,
     primary_purpose_code,
     secondary_purpose_code,
+    provenance_source="manual",
 ):
     ensure_metadata_dimensions(connection, load_metadata_dropdown_options(connection))
     shoe_id = dimension_id_by_code(connection, "shoe", "shoe_code", shoe_code)
@@ -1792,16 +2114,25 @@ def update_single_activity_metadata(
         """,
         (shoe_id, workout_type_id, activity_id),
     )
-    purpose_labels = []
     purpose_codes = []
     if primary_purpose_code:
         purpose_codes.append(primary_purpose_code)
     if secondary_purpose_code and secondary_purpose_code != primary_purpose_code:
         purpose_codes.append(secondary_purpose_code)
-    replace_activity_training_purposes_by_code(connection, activity_id, purpose_codes)
+    replace_activity_training_purposes_by_code(connection, activity_id, purpose_codes, provenance_source)
+
+    if shoe_code:
+        record_activity_metadata_provenance(connection, activity_id, "shoe", provenance_source)
+    else:
+        clear_activity_metadata_provenance(connection, activity_id, "shoe")
+
+    if workout_type_code:
+        record_activity_metadata_provenance(connection, activity_id, "workout_type", provenance_source)
+    else:
+        clear_activity_metadata_provenance(connection, activity_id, "workout_type")
 
 
-def replace_activity_training_purposes_by_code(connection, activity_id, purpose_codes):
+def replace_activity_training_purposes_by_code(connection, activity_id, purpose_codes, provenance_source="manual"):
     connection.execute(
         "DELETE FROM activity_training_purpose WHERE activity_id = ?",
         (activity_id,),
@@ -1830,6 +2161,16 @@ def replace_activity_training_purposes_by_code(connection, activity_id, purpose_
             """,
             (activity_id, training_purpose_id, "PRIMARY" if index == 0 else "SECONDARY"),
         )
+    if purpose_codes:
+        record_activity_metadata_provenance(connection, activity_id, "primary_purpose", provenance_source)
+        if len(purpose_codes) > 1:
+            record_activity_metadata_provenance(connection, activity_id, "secondary_purpose", provenance_source)
+        else:
+            clear_activity_metadata_provenance(connection, activity_id, "secondary_purpose")
+    else:
+        clear_activity_metadata_provenance(connection, activity_id, "primary_purpose")
+        clear_activity_metadata_provenance(connection, activity_id, "secondary_purpose")
+    record_coach_knowledge_shoe_memory(connection, activity_id)
 
 
 def apply_batch_metadata_update(
@@ -1839,6 +2180,7 @@ def apply_batch_metadata_update(
     workout_action,
     primary_action,
     secondary_action,
+    provenance_source="manual",
 ):
     if not activity_ids:
         return 0
@@ -1880,7 +2222,19 @@ def apply_batch_metadata_update(
                 labels.append(primary_label)
             if secondary_label and secondary_label != primary_label:
                 labels.append(secondary_label)
-            replace_activity_training_purposes_by_code(connection, activity_id, labels)
+            replace_activity_training_purposes_by_code(connection, activity_id, labels, provenance_source)
+        if shoe_action != "__KEEP__":
+            if shoe_action == "__CLEAR__":
+                clear_activity_metadata_provenance(connection, activity_id, "shoe")
+            else:
+                record_activity_metadata_provenance(connection, activity_id, "shoe", provenance_source)
+        if workout_action != "__KEEP__":
+            if workout_action == "__CLEAR__":
+                clear_activity_metadata_provenance(connection, activity_id, "workout_type")
+            else:
+                record_activity_metadata_provenance(connection, activity_id, "workout_type", provenance_source)
+        if not purpose_should_replace:
+            record_coach_knowledge_shoe_memory(connection, activity_id)
     return len(activity_ids)
 
 
@@ -1999,6 +2353,91 @@ def weekly_intelligence_payload(current):
     }
 
 
+def coach_knowledge_summary(connection, start_date, end_date, period_label):
+    if not start_date or not end_date:
+        return None
+
+    rows = connection.execute(
+        """
+        SELECT
+            activity_id,
+            activity_date,
+            activity_start_time,
+            shoe_id,
+            shoe_display_name,
+            workout_type_id,
+            workout_type_name_en,
+            workout_type_name_zh,
+            primary_training_purpose_id,
+            primary_training_purpose_name_en,
+            primary_training_purpose_name_zh
+        FROM activity_review_view
+        WHERE activity_date BETWEEN ? AND ?
+        ORDER BY activity_start_time ASC
+        """,
+        (start_date, end_date),
+    ).fetchall()
+
+    complete_rows = [
+        row for row in rows
+        if row["shoe_id"] is not None
+        and row["workout_type_id"] is not None
+        and row["primary_training_purpose_id"] is not None
+    ]
+
+    if not complete_rows:
+        return {
+            "headline": f"{period_label}的 Coach Knowledge 還在累積",
+            "detail": "目前還沒有完整確認的活動可以回流到判讀，先讓第一批確認慢慢堆起來。",
+            "count": 0,
+            "proof_lines": [],
+            "confirmed_activities": [],
+        }
+
+    workout_counts = Counter()
+    purpose_counts = Counter()
+    shoe_counts = Counter()
+
+    for row in complete_rows:
+        workout_label = str(row["workout_type_name_zh"] or row["workout_type_name_en"] or "未標註").strip()
+        purpose_label = str(row["primary_training_purpose_name_zh"] or row["primary_training_purpose_name_en"] or "未標註").strip()
+        shoe_label = str(row["shoe_display_name"] or "未標註").strip()
+        workout_counts[workout_label] += 1
+        purpose_counts[purpose_label] += 1
+        shoe_counts[shoe_label] += 1
+
+    shoe_types = len(shoe_counts)
+    workout_types = len(workout_counts)
+    purpose_types = len(purpose_counts)
+
+    proof_lines = [
+        f"✓ {len(complete_rows)} 堂已確認活動",
+        f"✓ 已確認內容涵蓋 {shoe_types} 種鞋款 / {workout_types} 種課表 / {purpose_types} 種目的",
+    ]
+
+    if workout_counts:
+        workout_label, workout_count = workout_counts.most_common(1)[0]
+        proof_lines.append(f"✓ 最常見課表：{workout_label}（{workout_count} 堂）")
+    if purpose_counts:
+        purpose_label, purpose_count = purpose_counts.most_common(1)[0]
+        proof_lines.append(f"✓ 最常見目的：{purpose_label}（{purpose_count} 堂）")
+    if shoe_counts:
+        shoe_label, shoe_count = shoe_counts.most_common(1)[0]
+        shoe_suffix = "次" if shoe_count == 1 else "次"
+        proof_lines.append(f"✓ 最常見鞋款：{shoe_label}（{shoe_count} {shoe_suffix}）")
+
+    headline = f"{period_label}的判讀已建立在 {len(complete_rows)} 堂已確認活動上"
+    detail = f"已確認內容涵蓋 {shoe_types} 種鞋款、{workout_types} 種課表、{purpose_types} 種目的；最常見鞋款是 {shoe_counts.most_common(1)[0][0]}（{shoe_counts.most_common(1)[0][1]} 次）。" if shoe_counts else "這個區間的已確認知識正在累積。"
+
+    return {
+        "headline": headline,
+        "detail": detail,
+        "count": len(complete_rows),
+        "proof_lines": proof_lines,
+        "confirmed_activities": complete_rows,
+    }
+
+
 def selected_week_intelligence(connection, week_offset=None):
     target_week = selected_week_summary(connection, week_offset)
     if not target_week:
@@ -2075,7 +2514,7 @@ def selected_week_intelligence(connection, week_offset=None):
     return weekly_intelligence_payload(dict(row))
 
 
-def weekly_review_payload(weekly, intelligence):
+def weekly_review_payload(weekly, intelligence, knowledge_summary=None):
     load_delta = intelligence["load_delta"]
     km_delta = intelligence["km_delta"]
     recovery_status = str(intelligence["recovery_status"] or "")
@@ -2102,6 +2541,13 @@ def weekly_review_payload(weekly, intelligence):
         focus = "這週真正留下來的，是可控感。"
 
     why = intelligence["coach_summary"]
+    knowledge_headline = None
+    knowledge_detail = None
+    if knowledge_summary:
+        knowledge_headline = knowledge_summary["headline"]
+        knowledge_detail = knowledge_summary["detail"]
+        if knowledge_summary["count"]:
+            why = f"{why} {knowledge_headline} {knowledge_detail}"
 
     if load_delta is not None and load_delta > 15:
         looking_forward = "下週，只記住一件事：先把恢復留出來。"
@@ -2119,6 +2565,9 @@ def weekly_review_payload(weekly, intelligence):
         "why": why,
         "focus": focus,
         "looking_forward": looking_forward,
+        "knowledge_headline": knowledge_headline,
+        "knowledge_detail": knowledge_detail,
+        "knowledge_count": knowledge_summary["count"] if knowledge_summary else 0,
         "cause_question": "什麼真正讓你學會了這件事？",
         "evidence_intro": evidence_intro,
         "reasoning_steps": [
@@ -3263,7 +3712,7 @@ def first_sentence(text):
     return content
 
 
-def monthly_overview_payload(monthly, intelligence, progress_row):
+def monthly_overview_payload(monthly, intelligence, progress_row, knowledge_summary=None):
     if not monthly or not intelligence:
         return None
     progress_pct = progress_row["progress_pct"] if progress_row else None
@@ -3278,6 +3727,12 @@ def monthly_overview_payload(monthly, intelligence, progress_row):
         phase = "平衡建構"
     else:
         phase = "基礎累積"
+
+    knowledge_headline = None
+    knowledge_detail = None
+    if knowledge_summary:
+        knowledge_headline = knowledge_summary["headline"]
+        knowledge_detail = knowledge_summary["detail"]
 
     if intelligence["is_partial_month"]:
         verdict = "正常"
@@ -3300,6 +3755,9 @@ def monthly_overview_payload(monthly, intelligence, progress_row):
         "verdict": verdict,
         "verdict_reason": verdict_reason,
         "progress_pct": progress_pct,
+        "knowledge_headline": knowledge_headline,
+        "knowledge_detail": knowledge_detail,
+        "knowledge_count": knowledge_summary["count"] if knowledge_summary else 0,
     }
 
 
@@ -4875,7 +5333,7 @@ def distribution_bar_groups(rows):
     """
 
 
-def monthly_briefing_why_points(monthly, intelligence, progress_row, coach_memory=None):
+def monthly_briefing_why_points(monthly, intelligence, progress_row, coach_memory=None, knowledge_summary=None):
     points = []
     load_delta = intelligence["load_delta"]
     km_delta = intelligence["km_delta"]
@@ -4912,6 +5370,11 @@ def monthly_briefing_why_points(monthly, intelligence, progress_row, coach_memor
 
     if coach_memory and coach_memory.get("follow_up"):
         points.append(f"從上月延續來看：{coach_memory['follow_up']}")
+
+    if knowledge_summary and knowledge_summary.get("count"):
+        points.append(
+            f"Coach Knowledge 已累積 {knowledge_summary['count']} 堂已確認活動，月回顧的判讀會更偏向已確認的訓練脈絡。"
+        )
 
     return points[:4]
 
@@ -5451,6 +5914,7 @@ def weekly_ai_handoff_text(
     history_rows_with_labels=None,
     monthly_overview=None,
     overview_attention=None,
+    knowledge_summary=None,
     include_raw_data=False,
     saved_reply=None,
 ):
@@ -5548,6 +6012,10 @@ def weekly_ai_handoff_text(
         context_lines.append(f"- Monthly Position：{monthly_overview.get('verdict') or '—'}")
         context_lines.append(f"- Monthly Summary：{monthly_overview.get('verdict_reason') or '—'}")
 
+    if knowledge_summary:
+        context_lines.append(f"- Coach Knowledge：{knowledge_summary['headline']}")
+        context_lines.append(f"- Confirmed Knowledge：{knowledge_summary['detail']}")
+
     prompt_lines = [
         "請根據以下已治理的跑步資料，用繁體中文做進一步分析。",
         "請先回答這週真正留下來的是什麼，再說明原因，最後只留一個下週提醒。",
@@ -5574,6 +6042,14 @@ def weekly_ai_handoff_text(
         "## Reasoning",
         *cause_lines,
     ]
+
+    if knowledge_summary:
+        prompt_lines.extend([
+            "",
+            "## Coach Knowledge",
+            f"- Headline：{knowledge_summary['headline']}",
+            f"- Detail：{knowledge_summary['detail']}",
+        ])
 
     if key_session_lines:
         prompt_lines.extend([
@@ -5660,6 +6136,7 @@ def weekly_ai_handoff_panel(
     history_rows_with_labels=None,
     monthly_overview=None,
     overview_attention=None,
+    knowledge_summary=None,
     saved_reply=None,
 ):
     handoff_text = weekly_ai_handoff_text(
@@ -5672,6 +6149,7 @@ def weekly_ai_handoff_panel(
         history_rows_with_labels,
         monthly_overview,
         overview_attention,
+        knowledge_summary,
         include_raw_data=True,
         saved_reply=saved_reply,
     )
@@ -5712,7 +6190,7 @@ def weekly_ai_handoff_panel(
     """
 
 
-def monthly_ai_handoff_text(monthly, intelligence, progress_row, distribution_rows, key_session_rows, related_week_rows, coach_memory=None, include_raw_data=False, saved_reply=None):
+def monthly_ai_handoff_text(monthly, intelligence, progress_row, distribution_rows, key_session_rows, related_week_rows, coach_memory=None, knowledge_summary=None, include_raw_data=False, saved_reply=None):
     if not monthly or not intelligence:
         return ""
 
@@ -5849,6 +6327,12 @@ def monthly_ai_handoff_text(monthly, intelligence, progress_row, distribution_ro
             f"- Follow-up：{coach_memory['follow_up']}",
         ])
 
+    if knowledge_summary:
+        prompt_lines.extend([
+            f"- Coach Knowledge：{knowledge_summary['headline']}",
+            f"- Confirmed Knowledge：{knowledge_summary['detail']}",
+        ])
+
     reasoning_lines = []
     if intelligence["is_partial_month"]:
         completion = format_number(progress_pct, 0) if progress_pct is not None else "—"
@@ -5940,7 +6424,7 @@ def monthly_ai_handoff_text(monthly, intelligence, progress_row, distribution_ro
     return "\n".join(prompt_lines)
 
 
-def monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_rows, key_session_rows, related_week_rows, coach_memory=None, saved_reply=None):
+def monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_rows, key_session_rows, related_week_rows, coach_memory=None, knowledge_summary=None, saved_reply=None):
     handoff_text = monthly_ai_handoff_text(
         monthly,
         intelligence,
@@ -5949,6 +6433,7 @@ def monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_r
         key_session_rows,
         related_week_rows,
         coach_memory,
+        knowledge_summary,
         include_raw_data=True,
         saved_reply=saved_reply,
     )
@@ -6458,17 +6943,50 @@ def infer_purpose_choice_code(purpose_rows, workout_label, review):
     return first_choice_code(purpose_rows, "purpose")
 
 
+def infer_workout_choice_code(workout_rows, activity, review):
+    workout_label = str(activity["workout_type_name_en"] or activity["activity_type"] or "").lower()
+    distance = float(activity["distance_km"] or 0)
+    training_load = float(activity["training_load"] or 0)
+    pace_sec = activity["avg_pace_sec_per_km"]
+    pace_minutes = (float(pace_sec) / 60.0) if pace_sec not in (None, "") and float(pace_sec) > 0 else None
+    quality_workout = any(token in workout_label for token in ("tempo", "interval", "repetition", "fartlek", "marathon pace"))
+    long_run = any(token in workout_label for token in ("long run", "lsd")) or distance >= 18
+    easy_run = any(token in workout_label for token in ("easy", "recovery"))
+    if quality_workout or training_load >= 240 or (pace_minutes is not None and pace_minutes <= 5.2 and distance >= 8):
+        candidates = ["Tempo Run", "Interval", "Marathon Pace", "Fartlek"]
+    elif long_run or distance >= 16:
+        candidates = ["Long Run", "LSD", "Progression Run"]
+    elif easy_run or distance < 12 or training_load < 200:
+        candidates = ["Easy Run", "Recovery Run", "LSD"]
+    else:
+        candidates = ["Easy Run", "Long Run", "Tempo Run"]
+    for candidate in candidates:
+        wanted = normalize_choice_key(candidate)
+        for row in workout_rows:
+            workout_code = str(row["workout_type_code"] or "").strip()
+            workout_name = normalize_choice_key(
+                row["workout_name_zh"] or row["workout_name_en"] or ""
+            )
+            if not workout_code:
+                continue
+            if workout_name == wanted or wanted in workout_name or workout_name in wanted:
+                return workout_code
+    return first_choice_code(workout_rows, "workout")
+
+
 def activity_coach_knowledge_state(activity, review, shoe_rows, workout_rows, purpose_rows):
     workout_label = str(activity["workout_type_name_zh"] or activity["workout_type_name_en"] or activity["activity_type"] or "").strip()
     shoe_label = str(activity["shoe_display_name"] or "").strip()
     purpose_label = str(activity["primary_training_purpose_name_zh"] or activity["primary_training_purpose_name_en"] or "").strip()
     workout_context = workout_label if workout_label and workout_label not in {"活動", "Activity", "Run"} else ""
 
-    shoe_code = activity["shoe_code"] or first_choice_code(shoe_rows, "shoe")
+    shoe_code = activity["shoe_code"]
     workout_code = activity["workout_type_code"] or first_choice_code(workout_rows, "workout")
     purpose_code = activity["primary_training_purpose_code"] or infer_purpose_choice_code(purpose_rows, workout_label, review)
 
-    shoe_choice_label = shoe_label or label_for_choice_code(shoe_rows, "shoe", shoe_code, "未標註鞋款")
+    shoe_choice_label = shoe_label
+    if not shoe_choice_label:
+        shoe_choice_label = label_for_choice_code(shoe_rows, "shoe", shoe_code, "未標註鞋款") if shoe_code else "未標註鞋款"
     workout_choice_label = workout_label or label_for_choice_code(workout_rows, "workout", workout_code, "未標註課表")
     purpose_choice_label = purpose_label or label_for_choice_code(purpose_rows, "purpose", purpose_code, "未標註目的")
 
@@ -6481,9 +6999,9 @@ def activity_coach_knowledge_state(activity, review, shoe_rows, workout_rows, pu
                 f"最近幾堂 {workout_context} 都在用這雙鞋。" if workout_context else "CoachOS 先從最有把握的鞋款訊號起手。"
             ),
             "code": shoe_code,
-            "current": shoe_label or "CoachOS 目前還不知道。",
+            "current": shoe_label or "CoachOS 目前還不知道這堂課的鞋款。",
             "rows": shoe_rows,
-            "learned": f"{shoe_choice_label} 現在已經和 {workout_context or '這些'} 訓練建立關聯。",
+            "learned": f"這堂課的鞋款已經被 CoachOS 記住了：{shoe_choice_label}。" if shoe_code else "這堂課的鞋款還沒被記住。",
             "next_label": "課表",
             "continue_href": f'/?page=activity&activity={int(activity["activity_id"])}&coach_step=workout#activity-knowledge',
         },
@@ -6497,9 +7015,9 @@ def activity_coach_knowledge_state(activity, review, shoe_rows, workout_rows, pu
                 else "CoachOS 先把這堂課的型態補起來。"
             ),
             "code": workout_code,
-            "current": workout_context or "CoachOS 目前還不知道。",
+            "current": workout_context or "CoachOS 目前還不知道這堂課的課表。",
             "rows": workout_rows,
-            "learned": f"{workout_choice_label} 現在已經寫進這堂課的教練記憶。",
+            "learned": f"這堂課的課表已經被 CoachOS 記住了：{workout_choice_label}。",
             "next_label": "訓練目的",
             "continue_href": f'/?page=activity&activity={int(activity["activity_id"])}&coach_step=purpose#activity-knowledge',
         },
@@ -6513,29 +7031,159 @@ def activity_coach_knowledge_state(activity, review, shoe_rows, workout_rows, pu
                 else "CoachOS 先把這堂課真正要訓練什麼補起來。"
             ),
             "code": purpose_code,
-            "current": purpose_label or "CoachOS 目前還不知道。",
+            "current": purpose_label or "CoachOS 目前還不知道這堂課的訓練目的。",
             "rows": purpose_rows,
-            "learned": f"{purpose_choice_label} 現在已經成為 CoachOS 會記住的主要訓練目的。",
+            "learned": f"這堂課的訓練目的已經被 CoachOS 記住了：{purpose_choice_label}。",
             "next_label": "證據",
-            "continue_href": f'/?page=activity&activity={int(activity["activity_id"])}#activity-evidence',
+            # Keep the learned state when jumping to evidence so the panel does not reset
+            # back to the first step after the user leaves the completion card.
+            "continue_href": f'/?page=activity&activity={int(activity["activity_id"])}&coach_step=purpose_learned#activity-evidence',
         },
     }
     return steps
 
 
-def activity_coach_knowledge_panel(activity, split_rows, shoe_rows, workout_rows, purpose_rows, coach_step="shoe"):
+def activity_coach_knowledge_panel(activity, split_rows, shoe_rows, workout_rows, purpose_rows, coach_step=None):
     if not activity:
         return ""
 
     review = activity_review_payload(activity, split_rows)
-    step_key = str(coach_step or "shoe")
+    explicit_step = coach_step is not None and str(coach_step).strip() != ""
+    step_key = str(coach_step or "").strip()
     learned_mode = False
     if step_key.endswith("_learned"):
         learned_mode = True
         step_key = step_key.replace("_learned", "")
     if step_key not in {"shoe", "workout", "purpose"}:
-        step_key = "shoe"
+        step_key = ""
         learned_mode = False
+
+    has_shoe = activity["shoe_id"] is not None
+    has_workout = activity["workout_type_id"] is not None
+    has_purpose = activity["primary_training_purpose_id"] is not None
+    fully_learned = has_shoe and has_workout and has_purpose
+    activity_id = int(activity["activity_id"])
+    missing_shoe = step_key == "shoe" and not has_shoe
+    missing_workout = step_key == "workout" and not has_workout
+    missing_purpose = step_key == "purpose" and not has_purpose
+
+    if not explicit_step and not learned_mode:
+        if fully_learned:
+            step_key = "purpose"
+        elif not has_shoe:
+            step_key = "shoe"
+        elif not has_workout:
+            step_key = "workout"
+        elif not has_purpose:
+            step_key = "purpose"
+        else:
+            step_key = "purpose"
+
+    if missing_shoe:
+        metadata_href = "/?" + urlencode({
+            "page": "metadata",
+            "edit": activity_id,
+            "scope": "missing_shoe",
+        }) + "#metadata-edit"
+        return f"""
+          <section class="panel-section" id="activity-knowledge">
+            <h2>Coach Knowledge</h2>
+            <p class="note">先選一個最像的，確認後 CoachOS 才會記住這堂課。</p>
+            <div class="review-card knowledge-conversation-card">
+              <span>這堂課的鞋款 · 🏃</span>
+              <strong>這堂課還沒有鞋款，先去標註這堂課的鞋款</strong>
+              <p>CoachOS 不會在空白上確認。先補上鞋款，這堂課才會進入真正的學習流程。</p>
+              <div class="knowledge-because">
+                <span>因為</span>
+                <p>目前鞋款欄位是空的，沒有可學習的對象。</p>
+              </div>
+              <div class="knowledge-actions">
+                <a class="primary-action remember-scroll-link" href="{html.escape(metadata_href, quote=True)}">去標註鞋款</a>
+                <a class="secondary-action remember-scroll-link" href="/?page=activity&activity={activity_id}&coach_step=workout#activity-knowledge">先略過</a>
+              </div>
+            </div>
+          </section>
+        """
+
+    if missing_workout:
+        metadata_href = "/?" + urlencode({
+            "page": "metadata",
+            "edit": activity_id,
+            "scope": "missing_workout",
+        }) + "#metadata-edit"
+        return f"""
+          <section class="panel-section" id="activity-knowledge">
+            <h2>Coach Knowledge</h2>
+            <p class="note">先選一個最像的，確認後 CoachOS 才會記住這堂課。</p>
+            <div class="review-card knowledge-conversation-card">
+              <span>這堂課的課表 · ⚡</span>
+              <strong>這堂課還沒有課表，先去標註這堂課的課表</strong>
+              <p>CoachOS 不會在空白上確認。先補上課表，這堂課才有辦法進入學習流程。</p>
+              <div class="knowledge-because">
+                <span>因為</span>
+                <p>目前課表欄位是空的，沒有可學習的對象。</p>
+              </div>
+              <div class="knowledge-actions">
+                <a class="primary-action remember-scroll-link" href="{html.escape(metadata_href, quote=True)}">去標註課表</a>
+                <a class="secondary-action remember-scroll-link" href="/?page=activity&activity={activity_id}&coach_step=purpose#activity-knowledge">先略過</a>
+              </div>
+            </div>
+          </section>
+        """
+
+    if missing_purpose:
+        metadata_href = "/?" + urlencode({
+            "page": "metadata",
+            "edit": activity_id,
+            "scope": "missing_purpose",
+        }) + "#metadata-edit"
+        return f"""
+          <section class="panel-section" id="activity-knowledge">
+            <h2>Coach Knowledge</h2>
+            <p class="note">先選一個最像的，確認後 CoachOS 才會記住這堂課。</p>
+            <div class="review-card knowledge-conversation-card">
+              <span>這堂課的訓練目的 · 🎯</span>
+              <strong>這堂課還沒有訓練目的，先去標註這堂課的目的</strong>
+              <p>CoachOS 不會在空白上確認。先補上訓練目的，這堂課才會進入真正的學習流程。</p>
+              <div class="knowledge-because">
+                <span>因為</span>
+                <p>目前訓練目的欄位是空的，沒有可學習的對象。</p>
+              </div>
+              <div class="knowledge-actions">
+                <a class="primary-action remember-scroll-link" href="{html.escape(metadata_href, quote=True)}">去標註目的</a>
+                <a class="secondary-action remember-scroll-link" href="/?page=activity&activity={activity_id}&coach_step=purpose_learned#activity-evidence">先略過</a>
+              </div>
+            </div>
+          </section>
+        """
+
+    if fully_learned and not explicit_step and not learned_mode:
+        review_href = f'/?page=activity&activity={activity_id}&coach_step=purpose_learned#activity-evidence'
+        return f"""
+          <section class="panel-section" id="activity-knowledge">
+            <h2>Coach Knowledge</h2>
+            <p class="note">這堂課已經有完整標註，CoachOS 會直接讀。</p>
+            <div class="review-card knowledge-learned-card">
+              <span class="knowledge-complete-badge">✓ 已完整標註 · 這堂課可直接讀取</span>
+              <strong>這堂課已經有完整資料了</strong>
+              <p>如果要更新鞋款、課表或訓練目的，可以直接重新調整；如果只是要看證據，現在可以直接往下看。</p>
+              <div class="knowledge-complete-next">
+                <span>目前狀態</span>
+                <strong>完整標註</strong>
+                <p>這堂課已經有可讀的鞋款、課表與訓練目的，不需要再確認一次。</p>
+              </div>
+              <div class="knowledge-complete-next">
+                <span>下一步</span>
+                <strong>查看證據 / 重新調整</strong>
+                <p>若想修正資料，從重新調整開始；若想直接看證據，往下即可。</p>
+              </div>
+              <div class="knowledge-actions">
+                <a class="secondary-action remember-scroll-link" href="{html.escape(review_href, quote=True)}">查看證據</a>
+                <a class="primary-action remember-scroll-link" href="/?page=activity&activity={activity_id}&coach_step=shoe#activity-knowledge">重新調整</a>
+              </div>
+            </div>
+          </section>
+        """
 
     state = activity_coach_knowledge_state(activity, review, shoe_rows, workout_rows, purpose_rows)[step_key]
     activity_id = int(activity["activity_id"])
@@ -6545,18 +7193,28 @@ def activity_coach_knowledge_panel(activity, split_rows, shoe_rows, workout_rows
         return f"""
           <section class="panel-section" id="activity-knowledge">
             <h2>Coach Knowledge</h2>
-            <p class="note">一次只確認一件事。跑者確認，CoachOS 學習。</p>
+            <p class="note">先選一個最像的，確認後 CoachOS 才會記住這堂課。</p>
             <div class="review-card knowledge-learned-card">
-              <span class="knowledge-complete-badge">✓ 已完成 · CoachOS 學會了 · {html.escape(state["icon"])} {html.escape(state["label"])}</span>
+              <span class="knowledge-complete-badge">✓ 已完成 · 這堂課的{html.escape(state["label"])} · {html.escape(state["icon"])}</span>
               <strong>{html.escape(state["learned"])}</strong>
-              <p>已寫入 SQLite · 這一步的判讀已經更完整。</p>
+              <div class="knowledge-because">
+                <span>因為</span>
+                <p>{html.escape(state["reason"])}</p>
+              </div>
+              <p>已寫入 SQLite · 這堂課的判讀已經更完整。</p>
               <div class="knowledge-complete-next">
-                <span>下一步</span>
+                <span>目前狀態</span>
+                <strong>這堂課已經先記住了</strong>
+                <p>這堂課已經問過一次了。若要重新調整，按下面的按鈕就可以重來。</p>
+              </div>
+              <div class="knowledge-complete-next">
+                <span>證據</span>
                 <strong>{html.escape(state["next_label"])}</strong>
-                <p>這一步已經完成，現在直接往下一段前進。</p>
+                <p>這一步已經完成，現在直接去看這堂課的證據。</p>
               </div>
               <div class="knowledge-actions">
-                <a class="secondary-action remember-scroll-link" href="{html.escape(state["continue_href"], quote=True)}">前往下一步</a>
+                <a class="secondary-action remember-scroll-link" href="{html.escape(state["continue_href"], quote=True)}">查看證據</a>
+                <a class="primary-action remember-scroll-link" href="/?page=activity&activity={activity_id}&coach_step=shoe#activity-knowledge">重新調整</a>
               </div>
             </div>
           </section>
@@ -6582,43 +7240,37 @@ def activity_coach_knowledge_panel(activity, split_rows, shoe_rows, workout_rows
     return f"""
       <section class="panel-section" id="activity-knowledge">
         <h2>Coach Knowledge</h2>
-        <p class="note">一次只確認一件事。跑者確認，CoachOS 學習。</p>
+        <p class="note">先選一個最像的，確認後 CoachOS 才會記住這堂課。</p>
         <div class="review-card knowledge-conversation-card">
-          <span>CoachOS 覺得 · {html.escape(state["icon"])} {html.escape(state["label"])}</span>
+          <span>這堂課的{html.escape(state["label"])} · {html.escape(state["icon"])}</span>
           <strong>{html.escape(state["title"])}</strong>
           {current_block}
-          <div class="knowledge-because">
-            <span>因為</span>
-            <p>{html.escape(state["reason"])}</p>
-          </div>
           <div class="knowledge-actions">
             <form class="knowledge-action-form remember-scroll-form" method="post" action="/activity/coach-knowledge">
               <input type="hidden" name="activity_id" value="{activity_id}">
               <input type="hidden" name="coach_step" value="{html.escape(step_key, quote=True)}">
               <input type="hidden" name="choice_code" value="{html.escape(str(state["code"] or ""), quote=True)}">
               <input type="hidden" name="scroll_y" value="">
-              <button class="primary-action" type="submit" name="action" value="{confirm_action}">確認</button>
+              <button class="primary-action" type="submit" name="action" value="{confirm_action}">確認選擇</button>
               <button class="secondary-action" type="submit" name="action" value="skip">先略過</button>
             </form>
           </div>
-          <details class="knowledge-chooser">
-            <summary>改選其他</summary>
-            <form class="knowledge-choice-form remember-scroll-form" method="post" action="/activity/coach-knowledge">
-              <input type="hidden" name="activity_id" value="{activity_id}">
-              <input type="hidden" name="coach_step" value="{html.escape(step_key, quote=True)}">
-              <input type="hidden" name="action" value="choose">
-              <input type="hidden" name="scroll_y" value="">
-              <label class="inline-field">
-                <span>其他選項</span>
-                <select name="choice_code">
-                  {chooser_select}
-                </select>
-              </label>
-              <div class="form-actions">
-                <button type="submit">使用這個選擇</button>
-              </div>
-            </form>
-          </details>
+          <form class="knowledge-choice-form remember-scroll-form" method="post" action="/activity/coach-knowledge">
+            <input type="hidden" name="activity_id" value="{activity_id}">
+            <input type="hidden" name="coach_step" value="{html.escape(step_key, quote=True)}">
+            <input type="hidden" name="action" value="choose">
+            <input type="hidden" name="scroll_y" value="">
+            <label class="inline-field">
+              <span>改選其他</span>
+              <select name="choice_code">
+                {chooser_select}
+              </select>
+            </label>
+            <div class="form-actions">
+              <button type="submit">確認選擇</button>
+            </div>
+          </form>
+          <p class="note">先選一個最像的，按「確認選擇」就會記住；要改就直接換下拉選單。</p>
         </div>
       </section>
     """
@@ -6902,7 +7554,7 @@ def activity_review_panel(
     shoe_rows,
     workout_rows,
     purpose_rows,
-    coach_step="shoe",
+    coach_step=None,
     weekly_review=None,
     monthly_overview=None,
     saved_reply=None,
@@ -7220,7 +7872,7 @@ def journey_page_panel(story, timeline_rows, turning_point_rows, available_month
     """
 
 
-def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality_row, history_rows, distribution_rows, key_session_rows, related_week_rows, available_month_rows, selected_month, coach_memory=None, saved_reply=None):
+def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality_row, history_rows, distribution_rows, key_session_rows, related_week_rows, available_month_rows, selected_month, knowledge_summary=None, coach_memory=None, saved_reply=None):
     if not monthly or not intelligence:
         return """
         <section class="panel-section">
@@ -7279,8 +7931,13 @@ def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality
         verdict = "平衡建構"
         verdict_reason = "本月方向整體平衡，里程、品質課與長跑配置都還在合理範圍內。"
 
+    if knowledge_summary and knowledge_summary.get("count"):
+        verdict_reason = (
+            f"{verdict_reason} 這個判讀也已經把 {knowledge_summary['count']} 堂已確認活動的 Coach Knowledge 一起納入。"
+        )
+
     letter = monthly_letter_payload(monthly, intelligence, verdict, phase, progress_pct)
-    why_points = monthly_briefing_why_points(monthly, intelligence, progress_row, coach_memory)
+    why_points = monthly_briefing_why_points(monthly, intelligence, progress_row, coach_memory, knowledge_summary)
 
     if intelligence["is_partial_month"]:
         month_state = "進行中"
@@ -7327,6 +7984,11 @@ def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality
               <span>判讀依據</span>
               <p>這個月的判讀不是單看一次表現，而是看負荷、里程、連續性與前一階段是否接得起來。</p>
             </div>
+            <div class="coach-summary review-summary">
+              <span>Coach Knowledge</span>
+              <strong>{html.escape(knowledge_summary["headline"] if knowledge_summary else "這個月的 Coach Knowledge 還在累積")}</strong>
+              <p>{html.escape(knowledge_summary["detail"] if knowledge_summary else "先讓已確認的活動慢慢堆起來，月回顧就會更容易讀懂。")}</p>
+            </div>
             {monthly_coach_timeline_panel(monthly, verdict, verdict_reason, coach_memory, recommendation)}
             <div class="coach-summary review-summary">
               <span>為什麼這樣判斷</span>
@@ -7365,7 +8027,7 @@ def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality
         <h2>教練看了哪些關鍵課</h2>
         {monthly_key_sessions_table(key_session_rows)}
       </section>
-      {monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_rows, key_session_rows, related_week_rows, coach_memory, saved_reply)}
+      {monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_rows, key_session_rows, related_week_rows, coach_memory, knowledge_summary, saved_reply)}
     """
 
 
@@ -7377,6 +8039,7 @@ def weekly_review_panel(
     key_session_rows,
     selected_week="0",
     history_rows_with_labels=None,
+    knowledge_summary=None,
     monthly_overview=None,
     overview_attention=None,
     saved_reply=None,
@@ -7398,7 +8061,7 @@ def weekly_review_panel(
             f"負荷 {format_number(baseline_load, 1)} / "
             f"每公里負荷 {format_number(baseline_load_per_km, 1)}"
         )
-    review = weekly_review_payload(weekly, intelligence)
+    review = weekly_review_payload(weekly, intelligence, knowledge_summary)
     evidence_cards = [
         weekly_learning_driver_card(intelligence, distribution_rows),
         weekly_structure_card(distribution_rows),
@@ -7426,6 +8089,11 @@ def weekly_review_panel(
             <div class="coach-summary review-summary">
               <span>這週最大的收穫</span>
               <p>{html.escape(review["focus"])}</p>
+            </div>
+            <div class="coach-summary review-summary">
+              <span>Coach Knowledge</span>
+              <strong>{html.escape(knowledge_summary["headline"] if knowledge_summary else review["knowledge_headline"] or "這週的 Coach Knowledge 還在累積")}</strong>
+              <p>{html.escape(knowledge_summary["detail"] if knowledge_summary else review["knowledge_detail"] or "先讓已確認的活動慢慢累積起來。")}</p>
             </div>
             <div class="coach-summary review-summary">
               <span>教練判讀</span>
@@ -7469,7 +8137,7 @@ def weekly_review_panel(
         <h2>最近 5 週節奏</h2>
         {weekly_history_table(history_rows, selected_week)}
       </section>
-      {weekly_ai_handoff_panel(weekly, intelligence, review, distribution_rows, key_session_rows, history_rows, history_rows_with_labels, monthly_overview, overview_attention, saved_reply)}
+      {weekly_ai_handoff_panel(weekly, intelligence, review, distribution_rows, key_session_rows, history_rows, history_rows_with_labels, monthly_overview, overview_attention, knowledge_summary, saved_reply)}
     """
 
 
@@ -7930,7 +8598,7 @@ def training_metric_card_with_link(label, value, subtext="", href="", link_label
 
 def metadata_scope_link(scope, current_scope, count, label, note):
     active = " active" if scope == current_scope else ""
-    href = "/?" + urlencode({"page": "metadata", "scope": scope})
+    href = "/?" + urlencode({"page": "metadata", "scope": scope}) + "#metadata-batch"
     return f"""
       <a class="scope-link{active}" href="{html.escape(href, quote=True)}">
         <span>{html.escape(label)}</span>
@@ -8205,6 +8873,80 @@ def metadata_select(name, options, selected_code="", allow_blank=False, include_
     return f'<select name="{html.escape(name, quote=True)}"{form_attr}>{"".join(tags)}</select>'
 
 
+def metadata_edit_suggestions(connection, selected_row, workout_purpose_rows):
+    if not selected_row:
+        return {}
+
+    review_row = connection.execute(
+        """
+        SELECT *
+        FROM activity_review_view
+        WHERE activity_id = ?
+        """,
+        (selected_row["activity_id"],),
+    ).fetchone()
+    base_row = review_row or selected_row
+
+    suggestions = {
+        "shoe_code": str(selected_row["shoe_code"] or ""),
+        "workout_type_code": str(selected_row["workout_type_code"] or ""),
+        "primary_purpose_code": str(selected_row["primary_training_purpose_code"] or ""),
+        "secondary_purpose_code": "",
+        "notes": {},
+    }
+
+    review = activity_review_payload(base_row, [])
+    if not suggestions["workout_type_code"]:
+        inferred_workout = infer_workout_choice_code(workout_purpose_rows, base_row, review)
+        if inferred_workout:
+            suggestions["workout_type_code"] = inferred_workout
+            suggestions["notes"]["workout_type_code"] = "CoachOS 先依距離和負荷預填課表。"
+
+    selected_secondary_codes = parse_secondary_codes(selected_row["secondary_training_purpose_codes"])
+    if selected_secondary_codes:
+        suggestions["secondary_purpose_code"] = str(selected_secondary_codes[0] or "")
+
+    workout_to_purposes = {}
+    purpose_to_workout = {}
+    for row in workout_purpose_rows:
+        workout_code = str(row["workout_type_code"] or "").strip()
+        primary_code = str(row["primary_training_purpose_code"] or "").strip()
+        secondary_code = str(row["secondary_training_purpose_code"] or "").strip()
+        if workout_code and workout_code not in workout_to_purposes:
+            workout_to_purposes[workout_code] = {
+                "primary": primary_code,
+                "secondary": secondary_code,
+            }
+        for purpose_code in (primary_code, secondary_code):
+            if purpose_code and purpose_code not in purpose_to_workout:
+                purpose_to_workout[purpose_code] = workout_code
+
+    if not suggestions["workout_type_code"]:
+        inferred_workout = purpose_to_workout.get(suggestions["primary_purpose_code"]) or purpose_to_workout.get(suggestions["secondary_purpose_code"])
+        if inferred_workout:
+            suggestions["workout_type_code"] = inferred_workout
+            suggestions["notes"]["workout_type_code"] = "CoachOS 先依訓練目的預填課表。"
+
+    mapped = workout_to_purposes.get(suggestions["workout_type_code"] or "")
+    if mapped:
+        if not suggestions["primary_purpose_code"] and mapped.get("primary"):
+            suggestions["primary_purpose_code"] = mapped["primary"]
+            suggestions["notes"]["primary_purpose_code"] = "CoachOS 先依課表預填主要目的。"
+        if not suggestions["secondary_purpose_code"] and mapped.get("secondary"):
+            suggestions["secondary_purpose_code"] = mapped["secondary"]
+            suggestions["notes"]["secondary_purpose_code"] = "CoachOS 先依課表預填次要目的。"
+
+    workout_type_id = dimension_id_by_code(connection, "workout_type", "workout_type_code", suggestions["workout_type_code"])
+    primary_purpose_id = dimension_id_by_code(connection, "training_purpose", "training_purpose_code", suggestions["primary_purpose_code"])
+    if not suggestions["shoe_code"] and workout_type_id and primary_purpose_id:
+        memory_row = coach_knowledge_shoe_memory_row(connection, workout_type_id, primary_purpose_id)
+        if memory_row:
+            suggestions["shoe_code"] = str(memory_row["shoe_code"] or "")
+            suggestions["notes"]["shoe_code"] = "CoachOS 先依相似組合預填鞋款。"
+
+    return suggestions
+
+
 def workout_purpose_mapping_panel(workout_purpose_rows, purpose_rows):
     if not workout_purpose_rows:
         return """
@@ -8406,6 +9148,8 @@ def metadata_dimension_overview_panel(workout_rows, purpose_rows):
 def metadata_page_panel(
     candidates,
     selected_row,
+    selected_provenance,
+    selected_suggestions,
     shoes,
     workouts,
     purposes,
@@ -8455,6 +9199,7 @@ def metadata_page_panel(
         metadata_scope_link("missing_shoe", scope, scope_counts["missing_shoe"] or 0, "先補鞋款", "最快改善鞋款分析"),
         metadata_scope_link("missing_workout", scope, scope_counts["missing_workout"] or 0, "先補課表", "讓週 / 月回顧更準"),
         metadata_scope_link("missing_purpose", scope, scope_counts["missing_purpose"] or 0, "先補目的", "讓教練判讀更有語境"),
+        metadata_scope_link("complete", scope, scope_counts["complete"] or 0, "已標註", "直接看可讀的活動"),
         metadata_scope_link("all", scope, scope_counts["total"] or 0, "看最近全部", "需要回頭校正時再看"),
     ]
 
@@ -8513,6 +9258,24 @@ def metadata_page_panel(
     if selected_row:
         selected_secondary_codes = parse_secondary_codes(selected_row["secondary_training_purpose_codes"])
         secondary_selected = selected_secondary_codes[0] if selected_secondary_codes else ""
+        suggested_shoe_code = str((selected_suggestions or {}).get("shoe_code") or "")
+        suggested_workout_code = str((selected_suggestions or {}).get("workout_type_code") or "")
+        suggested_primary_code = str((selected_suggestions or {}).get("primary_purpose_code") or "")
+        suggested_secondary_code = str((selected_suggestions or {}).get("secondary_purpose_code") or "")
+        suggested_shoe_label = label_for_choice_code(shoes, "shoe", suggested_shoe_code, "未標註")
+        suggested_workout_label = label_for_choice_code(workouts, "workout", suggested_workout_code, "未標註")
+        suggested_primary_label = label_for_choice_code(purposes, "purpose", suggested_primary_code, "未標註")
+        shoe_selected = str(selected_row["shoe_code"] or suggested_shoe_code or "")
+        workout_selected = str(selected_row["workout_type_code"] or suggested_workout_code or "")
+        primary_selected = str(selected_row["primary_training_purpose_code"] or suggested_primary_code or "")
+        secondary_selected = str(secondary_selected or suggested_secondary_code or "")
+        shoe_source = provenance_source_label((selected_provenance or {}).get("shoe", {}).get("source"))
+        workout_source = provenance_source_label((selected_provenance or {}).get("workout_type", {}).get("source"))
+        primary_source = provenance_source_label((selected_provenance or {}).get("primary_purpose", {}).get("source"))
+        suggestion_notes = (selected_suggestions or {}).get("notes", {})
+        suggestion_banner = ""
+        if not selected_row["shoe_code"] or not selected_row["workout_type_code"] or not selected_row["primary_training_purpose_code"]:
+            suggestion_banner = "CoachOS 已先幫你預填可能的值，確認後再儲存就好。"
         workout_purpose_defaults = {
             str(row["workout_type_code"] or ""): {
                 "primary": str(row["primary_training_purpose_code"] or ""),
@@ -8534,6 +9297,7 @@ def metadata_page_panel(
                   </div>
                   <span class="status-badge balanced">{html.escape(metadata_status_label(selected_row))}</span>
                 </div>
+                {f'<div class="coach-summary review-summary"><span>預填建議</span><p>{html.escape(suggestion_banner)}</p></div>' if suggestion_banner else ""}
                 <div class="detail-chips">
                   {detail_chip("開始時間", str(selected_row["activity_start_time"]).replace("T", " ")[:16])}
                   {detail_chip("距離", f"{format_number(selected_row['distance_km'], 2)} km")}
@@ -8546,15 +9310,15 @@ def metadata_page_panel(
                   <input type="hidden" name="scroll_y" value="">
                   <label>
                     <span>鞋款</span>
-                    {metadata_select("shoe_code", shoe_options, selected_row["shoe_code"] or "", allow_blank=True)}
+                    {metadata_select("shoe_code", shoe_options, shoe_selected, allow_blank=True)}
                   </label>
                   <label>
                     <span>課表類型</span>
-                    {metadata_select("workout_type_code", workout_options, selected_row["workout_type_code"] or "", allow_blank=True, form_id="metadata-edit-form")}
+                    {metadata_select("workout_type_code", workout_options, workout_selected, allow_blank=True, form_id="metadata-edit-form")}
                   </label>
                   <label>
                     <span>主要訓練目的</span>
-                    {metadata_select("primary_purpose_code", purpose_options, selected_row["primary_training_purpose_code"] or "", allow_blank=True, form_id="metadata-edit-form")}
+                    {metadata_select("primary_purpose_code", purpose_options, primary_selected, allow_blank=True, form_id="metadata-edit-form")}
                   </label>
                   <label>
                     <span>次要訓練目的</span>
@@ -8585,17 +9349,24 @@ def metadata_page_panel(
               <div class="weekly-review-side">
                 <div class="review-card">
                   <span>目前鞋款</span>
-                  <strong>{html.escape(str(selected_row["shoe_display_name"] or "未標註"))}</strong>
+                  <strong>{html.escape(str(selected_row["shoe_display_name"] or suggested_shoe_label or "未標註"))}</strong>
+                  <p>來源：{html.escape(shoe_source)}</p>
+                  {"<p class=\"note\">這筆鞋款看起來像較早前補上的，建議回頭確認。</p>" if shoe_source == "CoachOS 先前補的" else ""}
+                  {"<p class=\"note\">" + html.escape(suggestion_notes.get("shoe_code", "")) + "</p>" if suggestion_notes.get("shoe_code") else ""}
                   <p>歷史活動可以標到已退役鞋款</p>
                 </div>
                 <div class="review-card">
                   <span>目前課表</span>
-                  <strong>{html.escape(str(selected_row["workout_type_name_zh"] or selected_row["workout_type_name_en"] or "未標註"))}</strong>
+                  <strong>{html.escape(str(selected_row["workout_type_name_zh"] or selected_row["workout_type_name_en"] or suggested_workout_label or "未標註"))}</strong>
+                  <p>來源：{html.escape(workout_source)}</p>
+                  {"<p class=\"note\">" + html.escape(suggestion_notes.get("workout_type_code", "")) + "</p>" if suggestion_notes.get("workout_type_code") else ""}
                   <p>描述這堂課怎麼跑</p>
                 </div>
                 <div class="review-card">
                   <span>目前目的</span>
-                  <strong>{html.escape(str(selected_row["primary_training_purpose_name_zh"] or selected_row["primary_training_purpose_name_en"] or "未標註"))}</strong>
+                  <strong>{html.escape(str(selected_row["primary_training_purpose_name_zh"] or selected_row["primary_training_purpose_name_en"] or suggested_primary_label or "未標註"))}</strong>
+                  <p>來源：{html.escape(primary_source)}</p>
+                  {"<p class=\"note\">" + html.escape(suggestion_notes.get("primary_purpose_code", "")) + "</p>" if suggestion_notes.get("primary_purpose_code") else ""}
                   <p>{html.escape(str(selected_row["secondary_training_purpose_names_zh"] or selected_row["secondary_training_purpose_names_en"] or "目前沒有次要目的"))}</p>
                 </div>
               </div>
@@ -8664,7 +9435,7 @@ def metadata_page_panel(
 
       {selected_html}
 
-      <section class="panel-section">
+      <section class="panel-section" id="metadata-batch">
         <h2>批次補標</h2>
         <p class="note">先選幾筆活動，再把相同標註一次套用。若只想更新其中一項，就把其他欄位留在保留原值。</p>
         <form method="post" action="/metadata/batch" class="remember-scroll-form">
@@ -11197,7 +11968,7 @@ def page_hero(page):
     """
 
 
-def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="unassigned", message="", month="", week="", batch="1", coach_step="shoe", scroll_y=""):
+def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="unassigned", message="", month="", week="", batch="1", coach_step=None, scroll_y=""):
     handoff_script = """
   <script>
     function extractAiReplyMarkdown(raw) {
@@ -11454,7 +12225,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     shoes_scope_data = None
     metadata_page_number = max(1, int(batch)) if str(batch).isdigit() else 1
     metadata_page_size = 60
-    coach_step = str(coach_step or "shoe")
+    coach_step = None if coach_step in ("", None) else str(coach_step)
     scroll_y = str(scroll_y or "")
     recent = []
     activity_rows = []
@@ -11545,6 +12316,15 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
                 connection,
                 int(edit_activity_id) if str(edit_activity_id).isdigit() else (metadata_rows[0]["activity_id"] if metadata_rows else 0),
             ) if (edit_activity_id or metadata_rows) else None
+            metadata_selected_provenance = activity_metadata_provenance_map(
+                connection,
+                metadata_selected["activity_id"] if metadata_selected else None,
+            ) if metadata_selected else {}
+            metadata_selected_suggestions = metadata_edit_suggestions(
+                connection,
+                metadata_selected,
+                metadata_workout_purpose_rows,
+            ) if metadata_selected else {}
 
         elif page == "settings":
             settings_dropdown_options, metadata_shoes, metadata_workouts, metadata_purposes, metadata_workout_purpose_rows = metadata_choice_sets(connection)
@@ -11563,8 +12343,21 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
             today = coach_today(intelligence, latest_activity)
             overview_attention = overview_attention_payload(connection)
 
-    weekly_review = weekly_review_payload(weekly, intelligence) if weekly and intelligence else None
-    monthly_overview = monthly_overview_payload(monthly, monthly_review, monthly_progress_row) if monthly and monthly_review else None
+        weekly_knowledge_summary = coach_knowledge_summary(
+            connection,
+            weekly["start_date"],
+            weekly["end_date"],
+            "本週",
+        ) if weekly else None
+        monthly_knowledge_summary = coach_knowledge_summary(
+            connection,
+            monthly["month_start"],
+            monthly["month_end"],
+            "本月",
+        ) if monthly else None
+
+    weekly_review = weekly_review_payload(weekly, intelligence, weekly_knowledge_summary) if weekly and intelligence else None
+    monthly_overview = monthly_overview_payload(monthly, monthly_review, monthly_progress_row, monthly_knowledge_summary) if monthly and monthly_review else None
     if selected:
         activity_ai_reply = get_ai_reply("activity", str(selected["activity_id"]))
     if weekly:
@@ -11593,7 +12386,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     if page == "weekly":
         return f"""{html_start}
     {weekly_selector_bar(week_rows, selected_week, "weekly")}
-    {weekly_review_panel(weekly, intelligence, weekly_rows, distribution_rows, weekly_key_session_rows, selected_week, weekly_rows_with_labels, monthly_overview, overview_attention, weekly_ai_reply)}
+    {weekly_review_panel(weekly, intelligence, weekly_rows, distribution_rows, weekly_key_session_rows, selected_week, weekly_rows_with_labels, weekly_knowledge_summary, monthly_overview, overview_attention, weekly_ai_reply)}
     {archive_metric_strip(summary)}
   </main>
 </body>
@@ -11617,7 +12410,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
 
     if page == "monthly":
         return f"""{html_start}
-    {monthly_review_panel(monthly, monthly_review, monthly_progress_row, monthly_assignment_quality_row, monthly_rows, monthly_distribution_rows, monthly_key_session_rows, monthly_related_week_rows, month_rows, selected_month, monthly_memory, monthly_ai_reply)}
+    {monthly_review_panel(monthly, monthly_review, monthly_progress_row, monthly_assignment_quality_row, monthly_rows, monthly_distribution_rows, monthly_key_session_rows, monthly_related_week_rows, month_rows, selected_month, monthly_knowledge_summary, monthly_memory, monthly_ai_reply)}
   </main>
 </body>
 </html>"""
@@ -11643,6 +12436,8 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     {metadata_page_panel(
         metadata_rows,
         metadata_selected,
+        metadata_selected_provenance,
+        metadata_selected_suggestions,
         metadata_shoes,
         metadata_workouts,
         metadata_purposes,
@@ -11763,7 +12558,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 (query.get("month") or [""])[0],
                 (query.get("week") or [""])[0],
                 (query.get("batch") or ["1"])[0],
-                (query.get("coach_step") or ["shoe"])[0],
+                (query.get("coach_step") or [None])[0],
                 (query.get("scroll_y") or [""])[0],
             )
         )
@@ -11942,6 +12737,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             current["workout_type_code"] or "",
                             current["primary_training_purpose_code"] or "",
                             "",
+                            provenance_source="coach_knowledge",
                         )
                     elif coach_step == "workout":
                         update_single_activity_metadata(
@@ -11951,6 +12747,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             choice_code,
                             current["primary_training_purpose_code"] or "",
                             "",
+                            provenance_source="coach_knowledge",
                         )
                     elif coach_step == "purpose":
                         update_single_activity_metadata(
@@ -11960,6 +12757,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             current["workout_type_code"] or "",
                             choice_code,
                             "",
+                            provenance_source="coach_knowledge",
                         )
                     connection.commit()
 
@@ -11999,6 +12797,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     workout_code,
                     primary_code,
                     secondary_code,
+                    provenance_source="manual",
                 )
                 connection.commit()
 
@@ -12035,6 +12834,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     workout_code,
                     primary_code,
                     secondary_code,
+                    provenance_source="manual",
                 )
                 connection.commit()
 

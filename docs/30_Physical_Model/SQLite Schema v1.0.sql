@@ -160,6 +160,16 @@ CREATE INDEX IF NOT EXISTS idx_activity_shoe_id
 CREATE INDEX IF NOT EXISTS idx_activity_workout_type_id
     ON activity(workout_type_id);
 
+CREATE TABLE IF NOT EXISTS activity_metadata_provenance (
+    activity_id INTEGER NOT NULL REFERENCES activity(id) ON DELETE CASCADE,
+    field_name TEXT NOT NULL CHECK (field_name IN ('shoe', 'workout_type', 'primary_purpose', 'secondary_purpose')),
+    source TEXT NOT NULL,
+    source_detail TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (activity_id, field_name)
+);
+
 CREATE TABLE IF NOT EXISTS activity_training_purpose (
     id INTEGER PRIMARY KEY,
 

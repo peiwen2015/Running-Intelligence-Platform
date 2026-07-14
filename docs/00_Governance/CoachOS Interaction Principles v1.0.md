@@ -62,6 +62,7 @@ The user should be able to tell whether the suggestion is:
 - uncertain
 
 The product should never hide uncertainty behind polished language.
+The product should also make the source of a value visible when the distinction matters, so runners can tell the difference between confirmed truth, CoachOS memory, and a legacy inference.
 
 ## Principle 5: Every Action Should Improve Understanding
 
@@ -73,6 +74,7 @@ Examples:
 - saving a workout type improves weekly grouping
 - saving a training purpose improves reasoning quality
 - saving an AI reply improves context for the next conversation
+- saving a provenance entry improves traceability for later correction
 
 If an action does not improve understanding, the product should question why it exists.
 

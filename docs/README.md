@@ -94,32 +94,35 @@ flowchart TD
 4. `00_Governance/Journey Product Vision v0.1.md`
 5. `00_Governance/Journey Experience Blueprint v0.1.md`
 6. `00_Governance/Worldview Milestones.md`
-7. `00_Governance/Product UX Polish Sprint v1.0.md`
-8. `00_Governance/Running Analytics Metadata Repository v1.1.md`
-9. `00_Governance/Metadata Design Standard v1.0.md`
-10. `01_ADR/`
-11. `00_Governance/Canonical Data Model Release Notes.md`
-12. `10_Canonical_Data_Model/Activity LDM v1.1 Final.md`
-13. `10_Canonical_Data_Model/LDM Validation Round 1 - activity.md`
-14. `10_Canonical_Data_Model/Kilometer Split LDM v1.1 Final.md`
-15. `10_Canonical_Data_Model/LDM Validation Round 1 - kilometer_split.md`
-16. `10_Canonical_Data_Model/Shoe LDM v1.1 Final.md`
-17. `10_Canonical_Data_Model/LDM Validation Round 1 - shoe.md`
-18. `10_Canonical_Data_Model/Workout Type LDM v1.1 Final.md`
-19. `10_Canonical_Data_Model/LDM Validation Round 1 - workout_type.md`
-20. `10_Canonical_Data_Model/Training Purpose LDM v1.1 Final.md`
-21. `10_Canonical_Data_Model/LDM Validation Round 1 - training_purpose.md`
-22. `10_Canonical_Data_Model/Activity Training Purpose LDM v1.1 Final.md`
-23. `10_Canonical_Data_Model/LDM Validation Round 1 - activity_training_purpose.md`
-24. `20_Architecture/Narrative Engine Boundary Draft v0.1.md`
-25. `20_Architecture/Narrative Engine Evolution v0.1.md`
-26. `20_Architecture/Context Gap Log v0.1.md`
-27. `20_Architecture/Recovery Knowledge Model v0.1.md`
-28. `20_Architecture/Load Build Knowledge Domain v0.1.md`
-29. `20_Architecture/Monthly Reading Pattern v0.1.md`
-30. `30_Physical_Model/SQLite Mapping Specification v1.0.md`
-31. `30_Physical_Model/SQLite Schema v1.0.sql`
-32. `30_Physical_Model/Semantic Layer v1.0.md`
+7. `00_Governance/CoachOS Coach Knowledge Lineage v1.0.md`
+8. `00_Governance/CoachOS Product Roadmap v1.0 Draft.md`
+9. `00_Governance/Product UX Polish Sprint v1.0.md`
+10. `00_Governance/Running Analytics Metadata Repository v1.1.md`
+11. `00_Governance/Metadata Design Standard v1.0.md`
+12. `01_ADR/`
+13. `00_Governance/Canonical Data Model Release Notes.md`
+14. `10_Canonical_Data_Model/Activity LDM v1.1 Final.md`
+15. `10_Canonical_Data_Model/LDM Validation Round 1 - activity.md`
+16. `10_Canonical_Data_Model/Kilometer Split LDM v1.1 Final.md`
+17. `10_Canonical_Data_Model/LDM Validation Round 1 - kilometer_split.md`
+18. `10_Canonical_Data_Model/Shoe LDM v1.1 Final.md`
+19. `10_Canonical_Data_Model/LDM Validation Round 1 - shoe.md`
+20. `10_Canonical_Data_Model/Workout Type LDM v1.1 Final.md`
+21. `10_Canonical_Data_Model/LDM Validation Round 1 - workout_type.md`
+22. `10_Canonical_Data_Model/Training Purpose LDM v1.1 Final.md`
+23. `10_Canonical_Data_Model/LDM Validation Round 1 - training_purpose.md`
+24. `10_Canonical_Data_Model/Activity Training Purpose LDM v1.1 Final.md`
+25. `10_Canonical_Data_Model/LDM Validation Round 1 - activity_training_purpose.md`
+26. `20_Architecture/Narrative Engine Boundary Draft v0.1.md`
+27. `20_Architecture/Narrative Engine Evolution v0.1.md`
+28. `20_Architecture/Context Gap Log v0.1.md`
+29. `20_Architecture/Recovery Knowledge Model v0.1.md`
+30. `20_Architecture/Load Build Knowledge Domain v0.1.md`
+31. `20_Architecture/Activity Coach Knowledge Implementation Note v0.1.md`
+32. `20_Architecture/Monthly Reading Pattern v0.1.md`
+33. `30_Physical_Model/SQLite Mapping Specification v1.0.md`
+34. `30_Physical_Model/SQLite Schema v1.0.sql`
+35. `30_Physical_Model/Semantic Layer v1.0.md`
 
 ## Governance Principle
 

@@ -8,6 +8,13 @@ The goal is not to add more fields.
 
 The goal is to make `workout type`, `training purpose`, and `shoe` tagging feel like a helpful part of understanding the runner.
 
+Coach Knowledge's final purpose is to make tagging a learning process, not an admin task:
+
+- tagging should happen faster
+- tagging should be easier to trust
+- tagging should teach CoachOS something useful
+- tagging results should improve later coaching
+
 ## Product Goal
 
 CoachOS should make metadata tagging feel like part of the coaching workflow, not a separate admin task.

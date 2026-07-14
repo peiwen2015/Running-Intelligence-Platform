@@ -187,11 +187,15 @@ docs/      架構與產品文件
 - 把資料匯入工具作為產品裡的資料入口，而不是獨立散落的小工具
 - 以 deterministic、本機可用、knowledge-first 的方式建立跑步教練產品
 
+下一個產品版本的命名方向已經收斂為 `v1.3 - Connected Coach Knowledge`，重點是讓已確認知識真的回流到 Weekly / Monthly 與 AI handoff。
+
 正式發布說明與版本備註可參考：
 
 [`LAUNCH_ANNOUNCEMENT.md`](/Users/perryliu/Documents/Running%20Analytics/LAUNCH_ANNOUNCEMENT.md)
 
 [`RELEASE_NOTES_v1.2.0.md`](/Users/perryliu/Documents/Running%20Analytics/RELEASE_NOTES_v1.2.0.md)
+
+[`docs/00_Governance/CoachOS Product Roadmap v1.0 Draft.md`](/Users/perryliu/Documents/Running%20Analytics/docs/00_Governance/CoachOS%20Product%20Roadmap%20v1.0%20Draft.md)
 
 ---
 

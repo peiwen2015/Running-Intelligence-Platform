@@ -32,6 +32,9 @@ Application
 | CoachOS Interaction Principles | v1.0 | Draft | `00_Governance/CoachOS Interaction Principles v1.0.md` |
 | CoachOS Review Checklist | v1.0 | Active | `00_Governance/CoachOS Review Checklist v1.0.md` |
 | CoachOS v1.1 Coach Knowledge | Draft | Product theme | `00_Governance/CoachOS v1.1 Coach Knowledge.md` |
+| CoachOS Coach Knowledge Lineage | v1.0 | Active | `00_Governance/CoachOS Coach Knowledge Lineage v1.0.md` |
+| CoachOS Product Roadmap | v1.0 Draft | Active draft | `00_Governance/CoachOS Product Roadmap v1.0 Draft.md` |
+| Activity Coach Knowledge Implementation Note | v0.1 | Active | `20_Architecture/Activity Coach Knowledge Implementation Note v0.1.md` |
 | Metadata Tagging Experience | v1.0 | Draft chapter | `00_Governance/Metadata Tagging Experience v1.0.md` |
 | Architecture Principles | v1.0 | Active | `00_Governance/Architecture Principles.md` |
 | Product Design Principles | v1.0 | Active | `00_Governance/Product Design Principles v1.0.md` |

@@ -26,3 +26,14 @@ The project now has a clearer boundary between:
 - `Journey` still exists in the codebase, but it is not a public product surface yet
 - The release tag for this version is `v1.2.0`
 - The README and launch announcement now point to this release version
+
+## Looking Ahead
+
+The next product milestone is being formalized as `v1.3 - Connected Coach Knowledge`.
+
+Its direction is to make confirmed Activity knowledge visible in later coaching surfaces:
+
+- Weekly reasoning
+- Monthly reasoning
+- Weekly / Monthly AI handoff
+- faster metadata editing through suggested values, while still requiring explicit confirmation

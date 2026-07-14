@@ -63,3 +63,11 @@ python3 app.py
 
 如果一般跑步平台是在幫你讀數據，
 CoachOS 想做的，是幫跑者慢慢學會像教練一樣理解訓練。
+
+## 往後看
+
+`v1.2.0` 已經是正式發布的版本，不會回頭重寫。
+
+下一個產品版本方向已正式收斂為 `v1.3 - Connected Coach Knowledge`，
+重點是讓已確認的 Activity 知識真的回流到 Weekly / Monthly 的判讀，
+並讓 AI handoff 一起帶上這份知識脈絡。

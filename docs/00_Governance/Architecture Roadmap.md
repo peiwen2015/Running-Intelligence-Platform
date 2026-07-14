@@ -4,6 +4,8 @@
 
 This roadmap tracks architecture maturity for CoachOS.
 
+Product-facing version naming is handled in [`CoachOS Product Roadmap v1.0 Draft.md`](/Users/perryliu/Documents/Running%20Analytics/docs/00_Governance/CoachOS%20Product%20Roadmap%20v1.0%20Draft.md).
+
 ## Product Architecture
 
 ```mermaid
