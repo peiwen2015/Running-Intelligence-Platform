@@ -233,6 +233,18 @@ PURPOSE_CATEGORY_OPTIONS = [
     ("Maintenance", "維持"),
 ]
 
+SHOE_CATEGORY_OPTIONS = [
+    ("Daily Trainer", "Daily Trainer"),
+    ("Recovery", "Recovery"),
+    ("Long Run", "Long Run"),
+    ("Tempo", "Tempo"),
+    ("Speed", "Speed / Interval"),
+    ("Race", "Race"),
+    ("Trail", "Trail"),
+    ("Treadmill", "Treadmill"),
+    ("Other", "Other"),
+]
+
 WORKOUT_TYPE_DIMENSION_DEFAULTS = {
     "Recovery Run": ("recovery_run", "Recovery Run", "恢復跑", "Recovery", 0, 0, 1, 10, "#7CB7B8"),
     "Easy Run": ("easy_run", "Easy Run", "輕鬆跑", "Easy", 0, 0, 0, 20, "#6FA8DC"),
@@ -1280,6 +1292,33 @@ def canonical_label(value):
     return label_primary(value).replace("₂", "2")
 
 
+KNOWN_SHOE_BRANDS = (
+    "adidas",
+    "asics",
+    "brooks",
+    "hoka",
+    "mizuno",
+    "new balance",
+    "nike",
+    "on",
+    "puma",
+    "saucony",
+)
+
+
+def parse_shoe_brand_model(label):
+    primary = label_primary(label) or str(label or "").strip()
+    normalized = re.sub(r"\s+", " ", primary).strip()
+    lowered = normalized.lower()
+    for brand in KNOWN_SHOE_BRANDS:
+        prefix = f"{brand} "
+        if lowered.startswith(prefix):
+            model = normalized[len(prefix):].strip()
+            if model:
+                return normalized[: len(brand)].upper() if brand == "hoka" else normalized[: len(brand)], model
+    return "", normalized
+
+
 def workout_type_display_name(row):
     candidates = [
         "name_zh",
@@ -1347,10 +1386,11 @@ def shoe_dimension_row(label):
     row = exact_or_primary_lookup(SHOE_DIMENSION_DEFAULTS, label)
     if row:
         return {**row, "is_active": 1}
-    primary = label_primary(label) or str(label or "").strip()
+    brand, model = parse_shoe_brand_model(label)
+    primary = model or label_primary(label) or str(label or "").strip()
     return {
         "shoe_code": code_from_label(primary, "shoe"),
-        "brand": "",
+        "brand": brand,
         "model": primary or "",
         "nickname": None,
         "category": "",
@@ -1464,6 +1504,10 @@ def reconcile_shoe_choice(connection, row):
             [row[column] for column in columns],
         )
         return
+    brand_value = row["brand"] if str(row["brand"] or "").strip() else existing["brand"]
+    model_value = row["model"] if str(row["model"] or "").strip() else existing["model"]
+    nickname_value = row["nickname"] if str(row["nickname"] or "").strip() else existing["nickname"]
+    category_value = row["category"] if str(row["category"] or "").strip() else existing["category"]
     connection.execute(
         """
         UPDATE shoe
@@ -1476,12 +1520,26 @@ def reconcile_shoe_choice(connection, row):
         WHERE shoe_code = ?
         """,
         (
-            row["brand"],
-            row["model"],
-            row["nickname"],
-            row["category"],
+            brand_value,
+            model_value,
+            nickname_value,
+            category_value,
             row["shoe_code"],
         ),
+    )
+
+
+def save_shoe_dimension(connection, shoe_id, category):
+    category_value = str(category or "").strip()
+    connection.execute(
+        """
+        UPDATE shoe
+        SET
+            category = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (category_value, shoe_id),
     )
 
 
@@ -8719,18 +8777,22 @@ def shoes_page_panel(rows, intelligence_rows, workout_rows, status_rows, scope_c
         display_name = shoe_display_name(row) or row["shoe_code"]
         active_selected = " selected" if row["is_active"] else ""
         retired_selected = " selected" if not row["is_active"] else ""
+        form_id = f"shoe-status-form-{row['id']}"
         status_editor_rows.append(
             f"""
             <tr>
               <td>{html.escape(display_name)}</td>
-              <td>{html.escape(str(row["category"] or ""))}</td>
               <td>
-                <form method="post" action="/shoes/save-status" class="inline-status-form remember-scroll-form">
+                <form id="{html.escape(form_id, quote=True)}" method="post" action="/shoes/save-status" class="inline-status-form remember-scroll-form">
                   <input type="hidden" name="shoe_id" value="{row["id"]}">
                   <input type="hidden" name="scroll_y" value="">
+                </form>
+                {metadata_select("category", SHOE_CATEGORY_OPTIONS, row["category"] or "", allow_blank=True, form_id=form_id)}
+              </td>
+              <td>
                   <label class="inline-field">
                     <span>狀態</span>
-                    <select name="is_active">
+                    <select name="is_active" form="{html.escape(form_id, quote=True)}">
                       <option value="1"{active_selected}>服役中</option>
                       <option value="0"{retired_selected}>已退役</option>
                     </select>
@@ -8739,12 +8801,11 @@ def shoes_page_panel(rows, intelligence_rows, workout_rows, status_rows, scope_c
               <td>
                   <label class="inline-field">
                     <span>退役日期</span>
-                    <input type="date" name="retire_date" value="{html.escape(str(row["retire_date"] or ""), quote=True)}">
+                    <input type="date" name="retire_date" form="{html.escape(form_id, quote=True)}" value="{html.escape(str(row["retire_date"] or ""), quote=True)}">
                   </label>
               </td>
               <td>
-                  <button type="submit">儲存</button>
-                </form>
+                  <button type="submit" form="{html.escape(form_id, quote=True)}">儲存</button>
               </td>
             </tr>
             """
@@ -8795,6 +8856,10 @@ def shoes_page_panel(rows, intelligence_rows, workout_rows, status_rows, scope_c
               <label>
                 <span>鞋款名稱</span>
                 <input type="text" name="shoe_name" placeholder="例如：Adidas Boston 13" required>
+              </label>
+              <label>
+                <span>初始化分類</span>
+                {metadata_select("category", SHOE_CATEGORY_OPTIONS, "", allow_blank=True)}
               </label>
               <div class="form-actions">
                 <button type="submit">新增鞋款</button>
@@ -13046,12 +13111,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/shoes/add":
             form = parse_qs(body.decode("utf-8"))
             scroll_y = first_form_value(form, "scroll_y", "").strip()
+            category = first_form_value(form, "category", "").strip()
             try:
                 with connect() as connection:
                     shoe_name = append_shoe_option(first_form_value(form, "shoe_name"), connection)
                     ensure_metadata_dimensions(connection, load_metadata_dropdown_options(connection))
+                    if category:
+                        shoe_row = shoe_dimension_row(shoe_name)
+                        save_shoe_dimension(
+                            connection,
+                            dimension_id_by_code(connection, "shoe", "shoe_code", shoe_row["shoe_code"]),
+                            category,
+                        )
                     connection.commit()
-                message = f"已新增鞋款：{shoe_name}"
+                message = f"已新增鞋款：{shoe_name}" + (f"（{category}）" if category else "")
             except ValueError as exc:
                 message = str(exc)
             except Exception:
@@ -13068,9 +13141,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             shoe_id = int(first_form_value(form, "shoe_id", "0") or "0")
             is_active = 1 if first_form_value(form, "is_active", "1") == "1" else 0
             retire_date = first_form_value(form, "retire_date", "").strip() or None
+            category = first_form_value(form, "category", "").strip()
             scroll_y = first_form_value(form, "scroll_y", "").strip()
 
             with connect() as connection:
+                save_shoe_dimension(connection, shoe_id, category)
                 connection.execute(
                     """
                     UPDATE shoe
@@ -13084,7 +13159,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
                 connection.commit()
 
-            params = {"page": "shoes", "message": "鞋款狀態已儲存"}
+            params = {"page": "shoes", "message": "鞋款設定已儲存"}
             if scroll_y:
                 params["scroll_y"] = scroll_y
             location = "/?" + urlencode(params)

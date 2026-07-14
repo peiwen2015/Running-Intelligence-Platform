@@ -495,6 +495,33 @@ def canonical_label(value):
     return label_primary(value).replace("₂", "2").replace("₂", "2")
 
 
+KNOWN_SHOE_BRANDS = (
+    "adidas",
+    "asics",
+    "brooks",
+    "hoka",
+    "mizuno",
+    "new balance",
+    "nike",
+    "on",
+    "puma",
+    "saucony",
+)
+
+
+def parse_shoe_brand_model(label):
+    primary = label_primary(label) or str(label or "").strip()
+    normalized = re.sub(r"\s+", " ", primary).strip()
+    lowered = normalized.lower()
+    for brand in KNOWN_SHOE_BRANDS:
+        prefix = f"{brand} "
+        if lowered.startswith(prefix):
+            model = normalized[len(prefix):].strip()
+            if model:
+                return normalized[: len(brand)].upper() if brand == "hoka" else normalized[: len(brand)], model
+    return "", normalized
+
+
 def code_from_label(value, prefix):
     label = canonical_label(value).lower()
     code = re.sub(r"[^a-z0-9]+", "_", label).strip("_")
@@ -520,10 +547,11 @@ def shoe_dimension_row(label):
             **row,
             "is_active": 1,
         }
-    primary = label_primary(label) or str(label or "").strip()
+    brand, model = parse_shoe_brand_model(label)
+    primary = model or label_primary(label) or str(label or "").strip()
     return {
         "shoe_code": code_from_label(primary, "shoe"),
-        "brand": "",
+        "brand": brand,
         "model": primary or "",
         "nickname": None,
         "category": "",
