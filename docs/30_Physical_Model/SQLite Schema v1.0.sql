@@ -232,6 +232,66 @@ CREATE TABLE IF NOT EXISTS kilometer_split (
 CREATE INDEX IF NOT EXISTS idx_kilometer_split_activity_id
     ON kilometer_split(activity_id);
 
+CREATE TABLE IF NOT EXISTS activity_workout_structure (
+    activity_id INTEGER PRIMARY KEY REFERENCES activity(id) ON DELETE CASCADE,
+    has_workout_structure INTEGER NOT NULL CHECK (has_workout_structure IN (0, 1)),
+    source TEXT NOT NULL DEFAULT 'fit',
+    sport TEXT,
+    sub_sport TEXT,
+    workout_name TEXT,
+    workout_description TEXT,
+    num_valid_steps INTEGER CHECK (num_valid_steps IS NULL OR num_valid_steps >= 0),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS activity_workout_step (
+    id INTEGER PRIMARY KEY,
+    activity_id INTEGER NOT NULL REFERENCES activity(id) ON DELETE CASCADE,
+    step_index INTEGER NOT NULL CHECK (step_index > 0),
+    source_message_index INTEGER,
+    intensity TEXT,
+    duration_type TEXT,
+    duration_value INTEGER,
+    duration_distance_m REAL CHECK (duration_distance_m IS NULL OR duration_distance_m >= 0),
+    duration_time_sec REAL CHECK (duration_time_sec IS NULL OR duration_time_sec >= 0),
+    target_type TEXT,
+    target_value REAL,
+    target_value_low REAL,
+    target_value_high REAL,
+    target_hr_zone INTEGER,
+    repeat_steps INTEGER,
+    secondary_target_value REAL,
+    custom_target_value_low REAL,
+    custom_target_value_high REAL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (activity_id, step_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_workout_step_activity_id
+    ON activity_workout_step(activity_id);
+
+CREATE TABLE IF NOT EXISTS activity_workout_split (
+    id INTEGER PRIMARY KEY,
+    activity_id INTEGER NOT NULL REFERENCES activity(id) ON DELETE CASCADE,
+    split_index INTEGER NOT NULL CHECK (split_index > 0),
+    source_message_index INTEGER,
+    split_type TEXT,
+    num_splits INTEGER,
+    total_distance_m REAL CHECK (total_distance_m IS NULL OR total_distance_m >= 0),
+    total_timer_time_sec REAL CHECK (total_timer_time_sec IS NULL OR total_timer_time_sec >= 0),
+    avg_speed_mps REAL CHECK (avg_speed_mps IS NULL OR avg_speed_mps >= 0),
+    sport TEXT,
+    sub_sport TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (activity_id, split_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_workout_split_activity_id
+    ON activity_workout_split(activity_id);
+
 CREATE VIEW IF NOT EXISTS activity_view AS
 SELECT
     activity.*,

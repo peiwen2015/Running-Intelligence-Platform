@@ -35,6 +35,8 @@ from fit_to_excel import (
     load_dropdown_options,
     output_month_label,
     parse_garmin_activity_id,
+    refresh_sqlite_gps_and_workout_structure,
+    sync_activity_workout_structure,
     weighted_average,
     write_fit_to_sqlite,
 )
@@ -57,6 +59,8 @@ BATCH_JOBS = {}
 BATCH_JOBS_LOCK = threading.Lock()
 GPS_BACKFILL_JOBS = {}
 GPS_BACKFILL_JOBS_LOCK = threading.Lock()
+WORKOUT_STRUCTURE_BACKFILL_JOBS = {}
+WORKOUT_STRUCTURE_BACKFILL_JOBS_LOCK = threading.Lock()
 ACTIVITY_INFO_FIELDS = [
     ("activity_name", "活動名稱", "text", "活動名稱"),
     ("shoe", "鞋款", "select", "鞋款"),
@@ -208,11 +212,31 @@ def workbook_summary(path):
         ("平均配速", pace_text(total_seconds, total_distance)),
         ("平均心率", weighted_average(avg_hr_pairs, 1) if avg_hr_pairs else ""),
         ("平均功率", f"{weighted_average(avg_power_pairs, 1)} W" if avg_power_pairs else ""),
+        ("課表結構", workbook_workout_structure_label(wb)),
         ("天氣", weather_summary(info)),
         ("Training Effect", training_effect_summary(info)),
         ("Training Load", info.get("Training Load")),
     ]
     return [(label, value) for label, value in summary if value not in ("", None)]
+
+
+def workbook_workout_structure_label(workbook_or_path):
+    if isinstance(workbook_or_path, (str, Path)):
+        wb = load_workbook(workbook_or_path, data_only=True)
+    else:
+        wb = workbook_or_path
+    if "課表結構" not in wb.sheetnames:
+        return "未寫入"
+    ws = wb["課表結構"]
+    has_structure = ws["B2"].value
+    workout_name = ws["B6"].value
+    step_count = ws["B9"].value
+    if str(has_structure).strip().lower() == "yes":
+        name = str(workout_name).strip() if workout_name not in ("", None) else "已帶入"
+        if step_count not in ("", None):
+            return f"有（{name}，{step_count} steps）"
+        return f"有（{name}）"
+    return "無"
 
 
 def activity_info_row_map(ws):
@@ -540,6 +564,12 @@ def batch_scan(month):
     rows = []
     for fit_path in fit_files_for_month(month):
         status, output_path = batch_file_status(fit_path)
+        workout_structure = ""
+        if output_path.exists():
+            try:
+                workout_structure = workbook_workout_structure_label(output_path)
+            except Exception:
+                workout_structure = "讀取失敗"
         rows.append(
             {
                 "fit_path": fit_path,
@@ -547,6 +577,7 @@ def batch_scan(month):
                 "output_path": output_path,
                 "output": output_path.name,
                 "status": status,
+                "workout_structure": workout_structure,
             }
         )
     return rows
@@ -564,6 +595,7 @@ def batch_status_table(month):
               <td><code>{html.escape(row["fit"])}</code></td>
               <td>{html.escape(row["status"])}</td>
               <td><code>{html.escape(row["output"])}</code></td>
+              <td>{html.escape(row["workout_structure"] or "—")}</td>
             </tr>
             """
         )
@@ -575,6 +607,7 @@ def batch_status_table(month):
               <th>FIT</th>
               <th>狀態</th>
               <th>Excel</th>
+              <th>課表結構</th>
             </tr>
           </thead>
           <tbody>
@@ -611,6 +644,31 @@ def sqlite_missing_gps_rows(month):
                 OR end_longitude IS NULL
               )
             ORDER BY activity_start_time DESC
+            """,
+            (month,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def sqlite_missing_workout_structure_rows(month):
+    bootstrap_sqlite_state(SQLITE_DB_PATH)
+    with sqlite3.connect(SQLITE_DB_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT
+                activity.id,
+                activity.garmin_activity_id,
+                activity.source_file_name,
+                activity.activity_start_time,
+                activity.activity_name,
+                activity.activity_type
+            FROM activity
+            LEFT JOIN activity_workout_structure
+                ON activity_workout_structure.activity_id = activity.id
+            WHERE substr(activity.activity_start_time, 1, 7) = ?
+              AND activity_workout_structure.activity_id IS NULL
+            ORDER BY activity.activity_start_time DESC
             """,
             (month,),
         ).fetchall()
@@ -661,6 +719,24 @@ def gps_backfill_scan(month):
     return scanned
 
 
+def workout_structure_backfill_scan(month):
+    rows = sqlite_missing_workout_structure_rows(month)
+    fit_index = fit_index_for_month(month)
+    scanned = []
+    for row in rows:
+        fit_path, matched_by = match_fit_for_gps_row(row, fit_index)
+        scanned.append(
+            {
+                **row,
+                "fit_path": fit_path,
+                "fit": relative_fit_path(fit_path) if fit_path else "",
+                "match_source": matched_by,
+                "status": "可補寫" if fit_path else "缺 FIT",
+            }
+        )
+    return scanned
+
+
 def gps_backfill_status_table(month):
     rows = gps_backfill_scan(month)
     if not rows:
@@ -690,6 +766,47 @@ def gps_backfill_status_table(month):
               <th>活動時間</th>
               <th>活動</th>
               <th>GPS</th>
+              <th>FIT</th>
+              <th>對應方式</th>
+            </tr>
+          </thead>
+          <tbody>
+            {"".join(html_rows)}
+          </tbody>
+        </table>
+      </div>
+    """
+
+
+def workout_structure_backfill_status_table(month):
+    rows = workout_structure_backfill_scan(month)
+    if not rows:
+        return '<p class="note">這個月份在 SQLite 裡沒有缺課表結構的活動。</p>'
+    html_rows = []
+    for row in rows:
+        activity_label = str(row["activity_name"] or row["activity_type"] or "活動")
+        start_time = str(row["activity_start_time"]).replace("T", " ")[:16]
+        fit_name = row["fit"] or "找不到對應 FIT"
+        match_label = "Garmin ID" if row["match_source"] == "activity_id" else ("原始檔名" if row["match_source"] == "source_file_name" else "需重新下載")
+        html_rows.append(
+            f"""
+            <tr>
+              <td>{html.escape(start_time)}</td>
+              <td>{html.escape(activity_label)}</td>
+              <td>{html.escape(row["status"])}</td>
+              <td><code>{html.escape(fit_name)}</code></td>
+              <td>{html.escape(match_label)}</td>
+            </tr>
+            """
+        )
+    return f"""
+      <div class="reference-table-wrap">
+        <table class="reference-table">
+          <thead>
+            <tr>
+              <th>活動時間</th>
+              <th>活動</th>
+              <th>課表結構</th>
               <th>FIT</th>
               <th>對應方式</th>
             </tr>
@@ -837,6 +954,14 @@ def update_gps_backfill_job(job_id, **updates):
         job.update(updates)
 
 
+def update_workout_structure_backfill_job(job_id, **updates):
+    with WORKOUT_STRUCTURE_BACKFILL_JOBS_LOCK:
+        job = WORKOUT_STRUCTURE_BACKFILL_JOBS.get(job_id)
+        if not job:
+            return
+        job.update(updates)
+
+
 def should_batch_convert(row, overwrite_newer=False, overwrite_all=False):
     if overwrite_all:
         return True
@@ -867,17 +992,29 @@ def batch_convert_result_html(job, job_id=""):
             parts.append(f"...另有 {len(failed) - 12} 個失敗項目<br>")
     if success:
         parts.append("<br>這次轉好的 Excel：<br>")
-        for saved in success[:20]:
+        for item in success[:20]:
+            saved = item["path"] if isinstance(item, dict) else item
+            sqlite_note = item.get("sqlite_note", "") if isinstance(item, dict) else ""
             edit_params = {"path": saved}
             if job_id:
                 edit_params["job"] = job_id
             edit_link = "/edit-excel?" + urlencode(edit_params)
             edited_badge = ' <span class="ok">✓ 已補</span>' if saved in edited else ""
-            parts.append(
+            try:
+                workout_structure = workbook_workout_structure_label(saved)
+            except Exception:
+                workout_structure = "課表結構讀取失敗"
+            line = (
                 f"<code>{html.escape(Path(saved).name)}</code> "
+                f'<span class="note">（{html.escape(workout_structure)}）</span> '
+            )
+            if sqlite_note:
+                line += f'<span class="note">{html.escape(sqlite_note)}</span> '
+            line += (
                 f'<a class="button secondary small-button" href="{html.escape(edit_link, quote=True)}">補活動資訊</a>'
                 f"{edited_badge}<br>"
             )
+            parts.append(line)
         if len(success) > 20:
             parts.append(f"...另有 {len(success) - 20} 個成功檔案，請到月份資料夾開啟。<br>")
     folder_link = "/open-folder?" + urlencode({"path": str(output_dir)})
@@ -942,6 +1079,67 @@ def gps_backfill_result_html(job, job_id=""):
     return "".join(parts)
 
 
+def workout_structure_backfill_result_html(job, job_id=""):
+    result = job.get("result") or {}
+    month = html.escape(job.get("month", ""))
+    success = result.get("success", [])
+    empty = result.get("empty", [])
+    missing = result.get("missing", [])
+    failed = result.get("failed", [])
+    parts = [
+        f"{month} 課表結構補寫完成：成功 {len(success)} 筆，無結構 {len(empty)} 筆，缺 FIT {len(missing)} 筆，失敗 {len(failed)} 筆。<br>",
+        f"SQLite：<code>{html.escape(str(SQLITE_DB_PATH))}</code><br>",
+    ]
+    if success:
+        parts.append("<br>已補回課表結構的活動：<br>")
+        for item in success[:20]:
+            parts.append(
+                f"{html.escape(item['activity_start_time'])} · "
+                f"{html.escape(item['activity_name'])} · "
+                f"{html.escape(item['summary'])}<br>"
+            )
+        if len(success) > 20:
+            parts.append(f"...另有 {len(success) - 20} 筆成功補寫<br>")
+    if empty:
+        parts.append("<br>FIT 已檢查，但沒有 structured workout：<br>")
+        for item in empty[:20]:
+            parts.append(
+                f"{html.escape(item['activity_start_time'])} · "
+                f"{html.escape(item['activity_name'])}<br>"
+            )
+        if len(empty) > 20:
+            parts.append(f"...另有 {len(empty) - 20} 筆沒有課表結構<br>")
+    if missing:
+        parts.append("<br>缺 FIT，需要重新下載：<br>")
+        for item in missing[:20]:
+            parts.append(
+                f"{html.escape(item['activity_start_time'])} · "
+                f"{html.escape(item['activity_name'])}"
+            )
+            if item.get("garmin_activity_id"):
+                parts.append(f" · Garmin ID <code>{html.escape(str(item['garmin_activity_id']))}</code>")
+            parts.append("<br>")
+        if len(missing) > 20:
+            parts.append(f"...另有 {len(missing) - 20} 筆缺 FIT<br>")
+    if failed:
+        parts.append("<br>補寫失敗：<br>")
+        for item in failed[:12]:
+            parts.append(
+                f"{html.escape(item['activity_start_time'])} · "
+                f"{html.escape(item['activity_name'])} · "
+                f"{html.escape(item['error'])}<br>"
+            )
+        if len(failed) > 12:
+            parts.append(f"...另有 {len(failed) - 12} 筆失敗<br>")
+    result_link = "/workout-structure-backfill-result?" + urlencode({"job": job_id}) if job_id else ""
+    parts.append(
+        "<br>"
+        + (f'<a class="button" href="{html.escape(result_link, quote=True)}">回這次課表結構補寫清單</a> ' if result_link else "")
+        + f'<a class="button secondary" href="/batch-convert?month={html.escape(job.get("month", ""), quote=True)}">回批次轉檔</a>'
+    )
+    return "".join(parts)
+
+
 def render_batch_result_page(job_id):
     with BATCH_JOBS_LOCK:
         job = dict(BATCH_JOBS.get(job_id) or {})
@@ -1000,6 +1198,35 @@ def render_gps_backfill_result_page(job_id):
 </html>"""
 
 
+def render_workout_structure_backfill_result_page(job_id):
+    with WORKOUT_STRUCTURE_BACKFILL_JOBS_LOCK:
+        job = dict(WORKOUT_STRUCTURE_BACKFILL_JOBS.get(job_id) or {})
+    if not job:
+        return render_batch_convert_page(error="找不到這次課表結構補寫清單，可能是程式已重新啟動。")
+    if job.get("status") != "done":
+        return render_workout_structure_backfill_progress_page(job_id)
+    return f"""<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>課表結構補寫結果</title>
+  <style>
+    {base_styles()}
+  </style>
+</head>
+<body>
+  <main>
+    {product_banner("課表結構補寫結果")}
+    {nav("batch")}
+    <section class="status ok">
+      {workout_structure_backfill_result_html(job, job_id)}
+    </section>
+  </main>
+</body>
+</html>"""
+
+
 def batch_job_snapshot(job_id):
     with BATCH_JOBS_LOCK:
         job = dict(BATCH_JOBS.get(job_id) or {})
@@ -1046,6 +1273,29 @@ def gps_backfill_job_snapshot(job_id):
     return snapshot
 
 
+def workout_structure_backfill_job_snapshot(job_id):
+    with WORKOUT_STRUCTURE_BACKFILL_JOBS_LOCK:
+        job = dict(WORKOUT_STRUCTURE_BACKFILL_JOBS.get(job_id) or {})
+    if not job:
+        return {"found": False}
+    current = int(job.get("current", 0) or 0)
+    total = int(job.get("total", 0) or 0)
+    percent = round(current / total * 100) if total else 0
+    snapshot = {
+        "found": True,
+        "status": job.get("status", "running"),
+        "message": job.get("message", ""),
+        "current": current,
+        "total": total,
+        "percent": percent,
+        "error": job.get("error", ""),
+        "result_html": "",
+    }
+    if snapshot["status"] == "done":
+        snapshot["result_html"] = workout_structure_backfill_result_html(job, job_id)
+    return snapshot
+
+
 def backfill_activity_gps_from_fit(connection, activity_id, fit_path):
     messages = decode_fit(fit_path)
     session_messages = messages.get("session_mesgs", []) if messages else []
@@ -1071,6 +1321,11 @@ def backfill_activity_gps_from_fit(connection, activity_id, fit_path):
         ),
     )
     return gps
+
+
+def backfill_activity_workout_structure_from_fit(connection, activity_id, fit_path):
+    messages = decode_fit(fit_path)
+    return sync_activity_workout_structure(connection, activity_id, messages)
 
 
 def run_gps_backfill_job(job_id, month):
@@ -1147,6 +1402,91 @@ def start_gps_backfill_job(month):
     return job_id
 
 
+def run_workout_structure_backfill_job(job_id, month):
+    rows = workout_structure_backfill_scan(month)
+    result = {"success": [], "empty": [], "missing": [], "failed": []}
+    total = len(rows)
+    update_workout_structure_backfill_job(job_id, total=total, current=0, message=f"找到 {total} 筆需要檢查的活動。")
+
+    with sqlite3.connect(SQLITE_DB_PATH) as connection:
+        for index, row in enumerate(rows, start=1):
+            activity_name = str(row["activity_name"] or row["activity_type"] or "活動")
+            activity_time = str(row["activity_start_time"]).replace("T", " ")[:16]
+            if not row["fit_path"]:
+                result["missing"].append(
+                    {
+                        "activity_id": row["id"],
+                        "activity_name": activity_name,
+                        "activity_start_time": activity_time,
+                        "garmin_activity_id": row.get("garmin_activity_id"),
+                    }
+                )
+                update_workout_structure_backfill_job(job_id, current=index, message=f"缺 FIT：{activity_name}")
+                continue
+            update_workout_structure_backfill_job(job_id, current=index - 1, message=f"補寫課表結構：{activity_name}")
+            try:
+                synced = backfill_activity_workout_structure_from_fit(connection, row["id"], row["fit_path"])
+                summary = synced.get("structure") or {}
+                if summary.get("has_workout_structure"):
+                    label = summary.get("workout_name") or f"{synced.get('step_count', 0)} steps / {synced.get('split_count', 0)} splits"
+                    result["success"].append(
+                        {
+                            "activity_id": row["id"],
+                            "activity_name": activity_name,
+                            "activity_start_time": activity_time,
+                            "summary": str(label),
+                        }
+                    )
+                else:
+                    result["empty"].append(
+                        {
+                            "activity_id": row["id"],
+                            "activity_name": activity_name,
+                            "activity_start_time": activity_time,
+                        }
+                    )
+                update_workout_structure_backfill_job(job_id, current=index, message=f"已補寫：{activity_name}")
+            except Exception as error:
+                result["failed"].append(
+                    {
+                        "activity_id": row["id"],
+                        "activity_name": activity_name,
+                        "activity_start_time": activity_time,
+                        "error": friendly_error(error),
+                    }
+                )
+                update_workout_structure_backfill_job(job_id, current=index, message=f"補寫失敗：{activity_name}")
+        connection.commit()
+
+    update_workout_structure_backfill_job(
+        job_id,
+        status="done",
+        current=total,
+        total=total,
+        result=result,
+        message="課表結構補寫完成。",
+    )
+
+
+def start_workout_structure_backfill_job(month):
+    job_id = uuid.uuid4().hex
+    with WORKOUT_STRUCTURE_BACKFILL_JOBS_LOCK:
+        WORKOUT_STRUCTURE_BACKFILL_JOBS[job_id] = {
+            "status": "running",
+            "message": "準備補寫課表結構...",
+            "current": 0,
+            "total": 0,
+            "month": month,
+        }
+    worker = threading.Thread(
+        target=run_workout_structure_backfill_job,
+        args=(job_id, month),
+        daemon=True,
+    )
+    worker.start()
+    return job_id
+
+
 def run_batch_convert_job(job_id, month, metadata, fetch_weather, overwrite_newer, overwrite_all):
     rows = batch_scan(month)
     targets = [row for row in rows if should_batch_convert(row, overwrite_newer, overwrite_all)]
@@ -1185,6 +1525,47 @@ def run_batch_convert_job(job_id, month, metadata, fetch_weather, overwrite_newe
     )
 
 
+def run_safe_refresh_job(job_id, month, fetch_weather):
+    rows = batch_scan(month)
+    targets = list(rows)
+    result = {"success": [], "skipped": [], "failed": []}
+    total = len(targets)
+    update_batch_job(job_id, total=total, current=0, message=f"找到 {total} 個需要安全重轉的 FIT。")
+
+    for index, row in enumerate(targets, start=1):
+        update_batch_job(job_id, current=index - 1, message=f"安全重轉中：{row['fit']}")
+        try:
+            saved = create_workbook(
+                row["fit_path"],
+                row["output_path"],
+                metadata={},
+                fetch_weather=fetch_weather,
+            )
+            sqlite_result = refresh_sqlite_gps_and_workout_structure(
+                row["fit_path"],
+                SQLITE_DB_PATH,
+                metadata={},
+                fetch_weather=fetch_weather,
+            )
+            sqlite_note = ""
+            if sqlite_result.get("status") == "missing_activity":
+                sqlite_note = "（SQLite 保留原狀，未找到既有活動）"
+            result["success"].append({"path": str(saved), "sqlite_note": sqlite_note})
+            update_batch_job(job_id, current=index, message=f"已完成：{row['fit']}")
+        except Exception as error:
+            result["failed"].append({"fit": row["fit"], "error": friendly_error(error)})
+            update_batch_job(job_id, current=index, message=f"安全重轉失敗：{row['fit']}")
+
+    update_batch_job(
+        job_id,
+        status="done",
+        current=total,
+        total=total,
+        result=result,
+        message="安全重轉完成。",
+    )
+
+
 def start_batch_convert_job(month, metadata, fetch_weather, overwrite_newer, overwrite_all):
     job_id = uuid.uuid4().hex
     with BATCH_JOBS_LOCK:
@@ -1199,6 +1580,26 @@ def start_batch_convert_job(month, metadata, fetch_weather, overwrite_newer, ove
     worker = threading.Thread(
         target=run_batch_convert_job,
         args=(job_id, month, metadata, fetch_weather, overwrite_newer, overwrite_all),
+        daemon=True,
+    )
+    worker.start()
+    return job_id
+
+
+def start_safe_refresh_job(month, fetch_weather):
+    job_id = uuid.uuid4().hex
+    with BATCH_JOBS_LOCK:
+        BATCH_JOBS[job_id] = {
+            "status": "running",
+            "message": "準備安全重轉...",
+            "current": 0,
+            "total": 0,
+            "month": month,
+            "edited": [],
+        }
+    worker = threading.Thread(
+        target=run_safe_refresh_job,
+        args=(job_id, month, fetch_weather),
         daemon=True,
     )
     worker.start()
@@ -2318,6 +2719,9 @@ def render_batch_convert_page(message="", error="", selected_month=""):
     gps_rows = gps_backfill_scan(selected_month)
     gps_fillable = len([row for row in gps_rows if row["fit_path"]])
     gps_missing = len([row for row in gps_rows if not row["fit_path"]])
+    workout_structure_rows = workout_structure_backfill_scan(selected_month)
+    workout_structure_fillable = len([row for row in workout_structure_rows if row["fit_path"]])
+    workout_structure_missing = len([row for row in workout_structure_rows if not row["fit_path"]])
     return f"""<!doctype html>
 <html lang="zh-Hant">
 <head>
@@ -2371,6 +2775,17 @@ def render_batch_convert_page(message="", error="", selected_month=""):
         <a class="button secondary" href="/batch-convert">重新掃描</a>
       </div>
     </form>
+    <form method="post" action="/safe-refresh-month">
+      <input type="hidden" name="month" value="{html.escape(selected_month, quote=True)}">
+      <input type="hidden" name="fetch_weather" value="1">
+      <fieldset>
+        <legend>快速動作</legend>
+        <p class="note">如果這個月的 Excel 需要套用新格式，例如補上課表結構、修正欄位或圖表，直接用這裡安全重轉就好。這條路只會重做 Excel，並補 SQLite 的 GPS / 課表結構；不會覆蓋原本 SQLite 裡已標註的鞋款、課表種類、訓練目的與其他手動資料。</p>
+      </fieldset>
+      <div class="actions">
+        <button type="submit">整月安全重轉</button>
+      </div>
+    </form>
     <form method="post" action="/gps-backfill">
       <input type="hidden" name="month" value="{html.escape(selected_month, quote=True)}">
       <fieldset>
@@ -2394,6 +2809,31 @@ def render_batch_convert_page(message="", error="", selected_month=""):
       </fieldset>
       <div class="actions">
         <button type="submit">補 SQLite GPS</button>
+      </div>
+    </form>
+    <form method="post" action="/workout-structure-backfill">
+      <input type="hidden" name="month" value="{html.escape(selected_month, quote=True)}">
+      <fieldset>
+        <legend>補課表結構到 SQLite</legend>
+        <p class="note">這裡會從 FIT 補回 structured workout 資訊到 SQLite，包括 workout、workout steps 與 split types。系統會先用 Garmin Activity ID，其次用原始檔名去找對應 FIT；找不到時就提醒你重新下載。若 FIT 本身沒有 structured workout，也會記成「已檢查」。</p>
+        <div class="grid">
+          <label>
+            <span>月份</span>
+            <input type="text" value="{html.escape(selected_month)}" readonly>
+          </label>
+          <label>
+            <span>可直接補寫</span>
+            <input type="text" value="{workout_structure_fillable} 筆" readonly>
+          </label>
+          <label>
+            <span>缺 FIT</span>
+            <input type="text" value="{workout_structure_missing} 筆" readonly>
+          </label>
+        </div>
+        {workout_structure_backfill_status_table(selected_month)}
+      </fieldset>
+      <div class="actions">
+        <button type="submit">補 SQLite 課表結構</button>
       </div>
     </form>
   </main>
@@ -2511,6 +2951,71 @@ def render_gps_backfill_progress_page(job_id):
 
       if (!data.found) {{
         message.textContent = "找不到 GPS 補寫工作，請重新開始。";
+        result.innerHTML = '<a class="button secondary" href="/batch-convert">回批次轉檔</a>';
+        return;
+      }}
+      message.textContent = data.error || data.message || "補寫中...";
+      fill.style.width = `${{data.percent || 0}}%`;
+      count.textContent = `${{data.current || 0}} / ${{data.total || 0}}`;
+      percent.textContent = `${{data.percent || 0}}%`;
+      if (data.status === "done") {{
+        fill.style.width = "100%";
+        percent.textContent = "100%";
+        result.innerHTML = data.result_html || "";
+        return;
+      }}
+      if (data.status === "error") {{
+        result.innerHTML = '<a class="button secondary" href="/batch-convert">重新開始</a>';
+        return;
+      }}
+      window.setTimeout(refreshProgress, 1000);
+    }}
+    refreshProgress();
+  </script>
+</body>
+</html>"""
+
+
+def render_workout_structure_backfill_progress_page(job_id):
+    return f"""<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CoachOS - 課表結構補寫進度</title>
+  <style>
+    {base_styles()}
+  </style>
+</head>
+<body>
+  <main>
+    {product_banner("課表結構補寫")}
+    {nav("batch")}
+    <section class="progress-card">
+      <p id="progress-message" class="progress-message">準備補寫課表結構...</p>
+      <div class="progress-bar" aria-label="課表結構補寫進度">
+        <div id="progress-fill" class="progress-fill"></div>
+      </div>
+      <div class="progress-meta">
+        <span id="progress-count">0 / 0</span>
+        <span id="progress-percent">0%</span>
+      </div>
+      <div id="progress-result" class="progress-result"></div>
+    </section>
+  </main>
+  <script>
+    const jobId = "{html.escape(job_id, quote=True)}";
+    async function refreshProgress() {{
+      const response = await fetch(`/workout-structure-backfill-status?job=${{encodeURIComponent(jobId)}}`, {{cache: "no-store"}});
+      const data = await response.json();
+      const message = document.getElementById("progress-message");
+      const fill = document.getElementById("progress-fill");
+      const count = document.getElementById("progress-count");
+      const percent = document.getElementById("progress-percent");
+      const result = document.getElementById("progress-result");
+
+      if (!data.found) {{
+        message.textContent = "找不到課表結構補寫工作，請重新開始。";
         result.innerHTML = '<a class="button secondary" href="/batch-convert">回批次轉檔</a>';
         return;
       }}
@@ -2665,11 +3170,17 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/gps-backfill-status":
             self.send_json(gps_backfill_job_snapshot(first_value(query, "job")))
             return
+        if parsed.path == "/workout-structure-backfill-status":
+            self.send_json(workout_structure_backfill_job_snapshot(first_value(query, "job")))
+            return
         if parsed.path == "/batch-result":
             self.send_html(render_batch_result_page(first_value(query, "job")))
             return
         if parsed.path == "/gps-backfill-result":
             self.send_html(render_gps_backfill_result_page(first_value(query, "job")))
+            return
+        if parsed.path == "/workout-structure-backfill-result":
+            self.send_html(render_workout_structure_backfill_result_page(first_value(query, "job")))
             return
         if parsed.path == "/edit-excel":
             self.send_html(render_edit_excel_page(Path(first_value(query, "path")), job_id=first_value(query, "job")))
@@ -2751,6 +3262,22 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_html(render_batch_progress_page(job_id))
             return
 
+        if parsed.path == "/safe-refresh-month":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length)
+            form, _files = parse_post_data(self.headers, body)
+            month = first_value(form, "month")
+            if not re.fullmatch(r"\d{4}-\d{2}", month or ""):
+                self.send_html(render_batch_convert_page(error="請選擇有效月份。"), status=400)
+                return
+            if not fit_files_for_month(month):
+                self.send_html(render_batch_convert_page(error="這個月份沒有 FIT 檔。", selected_month=month), status=400)
+                return
+            fetch_weather = first_value(form, "fetch_weather") == "1"
+            job_id = start_safe_refresh_job(month, fetch_weather)
+            self.send_html(render_batch_progress_page(job_id))
+            return
+
         if parsed.path == "/gps-backfill":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length)
@@ -2765,6 +3292,22 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             job_id = start_gps_backfill_job(month)
             self.send_html(render_gps_backfill_progress_page(job_id))
+            return
+
+        if parsed.path == "/workout-structure-backfill":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length)
+            form, _files = parse_post_data(self.headers, body)
+            month = first_value(form, "month")
+            if not re.fullmatch(r"\d{4}-\d{2}", month or ""):
+                self.send_html(render_batch_convert_page(error="請選擇有效月份。"), status=400)
+                return
+            structure_rows = workout_structure_backfill_scan(month)
+            if not structure_rows:
+                self.send_html(render_batch_convert_page(message="這個月份目前沒有缺課表結構的活動。", selected_month=month))
+                return
+            job_id = start_workout_structure_backfill_job(month)
+            self.send_html(render_workout_structure_backfill_progress_page(job_id))
             return
 
         if parsed.path == "/download-fit":

@@ -734,12 +734,16 @@ def activity_gps_points(session, records):
 
     if start_lat is None or start_lon is None:
         for record in records:
+            if not isinstance(record, dict):
+                continue
             start_lat, start_lon = record_coordinates(record)
             if start_lat is not None and start_lon is not None:
                 break
 
     if end_lat is None or end_lon is None:
         for record in reversed(records):
+            if not isinstance(record, dict):
+                continue
             end_lat, end_lon = record_coordinates(record)
             if end_lat is not None and end_lon is not None:
                 break
@@ -1358,7 +1362,7 @@ def add_options_sheet(wb, dropdown_options):
     return ws
 
 
-def add_metadata_sheet(wb, metadata, fit_path, session, rows, dropdown_options):
+def add_metadata_sheet(wb, metadata, fit_path, session, rows, records, dropdown_options):
     metadata = coerce_metadata(metadata)
     if metadata.get("rpe", "") == "":
         metadata["rpe"] = garmin_rpe_label(session.get("workout_rpe"), dropdown_options["garmin_rpe"])
@@ -1382,7 +1386,7 @@ def add_metadata_sheet(wb, metadata, fit_path, session, rows, dropdown_options):
             metadata["training_load"] = round(float(value))
 
     start = fit_datetime(session.get("start_time") or session.get("timestamp"))
-    gps = activity_gps_points(session, rows)
+    gps = activity_gps_points(session, records)
     activity = activity_summary(rows)
     economy = running_economy_summary(rows, session)
     stamina_start, stamina_end = stamina_summary(rows)
@@ -1561,6 +1565,125 @@ def add_metadata_sheet(wb, metadata, fit_path, session, rows, dropdown_options):
     return option_ws
 
 
+def add_workout_structure_sheet(wb, messages):
+    structure = sqlite_workout_structure_row(messages)
+    step_rows = sqlite_workout_step_rows(messages)
+    split_rows = sqlite_workout_split_rows(messages)
+
+    ws = wb.create_sheet("課表結構")
+    ws["A1"] = "課表結構"
+    ws["A1"].font = Font(name="Arial", size=14, bold=True, color="FFFFFF")
+    ws["A1"].fill = PatternFill("solid", fgColor="1F4E78")
+    ws.merge_cells("A1:B1")
+
+    summary_rows = [
+        ("有課表結構", "Yes" if structure["has_workout_structure"] else "No"),
+        ("來源", structure["source"] or ""),
+        ("運動", structure["sport"] or ""),
+        ("子類型", structure["sub_sport"] or ""),
+        ("課表名稱", structure["workout_name"] or ""),
+        ("課表描述", structure["workout_description"] or ""),
+        ("有效步驟數", structure["num_valid_steps"] if structure["num_valid_steps"] is not None else ""),
+        ("Workout Steps", len(step_rows)),
+        ("Workout Splits", len(split_rows)),
+    ]
+
+    thin_gray = Side(style="thin", color="D9E2F3")
+    summary_fill = PatternFill("solid", fgColor="D9EAF7")
+    row_no = 2
+    for label, value in summary_rows:
+        ws.cell(row_no, 1, label)
+        ws.cell(row_no, 2, cell_value(value))
+        ws.cell(row_no, 1).font = Font(name="Arial", bold=True)
+        ws.cell(row_no, 1).fill = summary_fill
+        ws.cell(row_no, 2).fill = summary_fill
+        ws.cell(row_no, 1).border = Border(bottom=thin_gray)
+        ws.cell(row_no, 2).border = Border(bottom=thin_gray)
+        row_no += 1
+
+    row_no += 1
+    step_header_row = row_no
+    step_headers = [
+        "Step",
+        "Intensity",
+        "Duration Type",
+        "Distance (m)",
+        "Time (sec)",
+        "Target Type",
+        "Target Low",
+        "Target High",
+        "Repeat Steps",
+    ]
+    for col, title in enumerate(step_headers, start=1):
+        cell = ws.cell(step_header_row, col, title)
+        cell.fill = PatternFill("solid", fgColor="2E7D32")
+        cell.font = Font(name="Arial", bold=True, color="FFFFFF")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for index, row in enumerate(step_rows, start=step_header_row + 1):
+        values = [
+            row["step_index"],
+            row["intensity"],
+            row["duration_type"],
+            row["duration_distance_m"],
+            row["duration_time_sec"],
+            row["target_type"],
+            row["target_value_low"] if row["target_value_low"] is not None else row["custom_target_value_low"],
+            row["target_value_high"] if row["target_value_high"] is not None else row["custom_target_value_high"],
+            row["repeat_steps"],
+        ]
+        for col, value in enumerate(values, start=1):
+            ws.cell(index, col, cell_value(value))
+
+    row_no = step_header_row + max(len(step_rows), 1) + 3
+    split_header_row = row_no
+    split_headers = [
+        "Split",
+        "Split Type",
+        "Num Splits",
+        "Distance (m)",
+        "Timer Time (sec)",
+        "Avg Speed (m/s)",
+        "Sport",
+        "Sub Sport",
+    ]
+    for col, title in enumerate(split_headers, start=1):
+        cell = ws.cell(split_header_row, col, title)
+        cell.fill = PatternFill("solid", fgColor="7030A0")
+        cell.font = Font(name="Arial", bold=True, color="FFFFFF")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for index, row in enumerate(split_rows, start=split_header_row + 1):
+        values = [
+            row["split_index"],
+            row["split_type"],
+            row["num_splits"],
+            row["total_distance_m"],
+            row["total_timer_time_sec"],
+            row["avg_speed_mps"],
+            row["sport"],
+            row["sub_sport"],
+        ]
+        for col, value in enumerate(values, start=1):
+            ws.cell(index, col, cell_value(value))
+
+    widths = {
+        "A": 12,
+        "B": 20,
+        "C": 18,
+        "D": 14,
+        "E": 16,
+        "F": 16,
+        "G": 14,
+        "H": 14,
+        "I": 14,
+    }
+    for col, width in widths.items():
+        ws.column_dimensions[col].width = width
+    ws.freeze_panes = "A2"
+    return ws
+
+
 def add_percentage_values(ws, row_count, metadata):
     max_hr = metadata.get("max_hr")
     critical_power = metadata.get("critical_power")
@@ -1638,7 +1761,7 @@ def sqlite_activity_row(fit_path, messages, session, rows, metadata):
 
     economy = running_economy_summary(rows, session)
     stamina_start, stamina_end = stamina_summary(rows) if has_stamina_data(messages) else (None, None)
-    gps = activity_gps_points(session, rows)
+    gps = activity_gps_points(session, messages.get("record_mesgs", []))
 
     return {
         "fit_sha256": metadata.get("fit_sha256"),
@@ -1740,6 +1863,175 @@ def sqlite_split_rows(messages):
             }
         )
     return result
+
+
+def fit_text_value(value):
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            text = str(item or "").strip()
+            if text:
+                return text
+        return None
+    text = str(value or "").strip()
+    return text or None
+
+
+def sqlite_workout_structure_row(messages):
+    workout_messages = messages.get("workout_mesgs", []) if messages else []
+    workout_steps = messages.get("workout_step_mesgs", []) if messages else []
+    workout_splits = messages.get("split_mesgs", []) if messages else []
+    workout = workout_messages[0] if workout_messages else {}
+    has_structure = bool(workout_messages or workout_steps or workout_splits)
+    return {
+        "has_workout_structure": 1 if has_structure else 0,
+        "source": "fit",
+        "sport": null_if_blank(workout.get("sport")),
+        "sub_sport": null_if_blank(workout.get("sub_sport")),
+        "workout_name": fit_text_value(workout.get("wkt_name")),
+        "workout_description": fit_text_value(workout.get("wkt_description")),
+        "num_valid_steps": int_or_none(workout.get("num_valid_steps")),
+    }
+
+
+def sqlite_workout_step_rows(messages):
+    workout_steps = messages.get("workout_step_mesgs", []) if messages else []
+    rows = []
+    for index, step in enumerate(workout_steps, start=1):
+        rows.append(
+            {
+                "step_index": index,
+                "source_message_index": int_or_none(step.get("message_index")),
+                "intensity": null_if_blank(step.get("intensity")),
+                "duration_type": null_if_blank(step.get("duration_type")),
+                "duration_value": int_or_none(step.get("duration_value")),
+                "duration_distance_m": float_or_none(step.get("duration_distance")),
+                "duration_time_sec": float_or_none(step.get("duration_time")),
+                "target_type": null_if_blank(step.get("target_type")),
+                "target_value": float_or_none(step.get("target_value")),
+                "target_value_low": float_or_none(step.get("target_value_low")),
+                "target_value_high": float_or_none(step.get("target_value_high")),
+                "target_hr_zone": int_or_none(step.get("target_hr_zone")),
+                "repeat_steps": int_or_none(step.get("repeat_steps")),
+                "secondary_target_value": float_or_none(step.get("secondary_target_value")),
+                "custom_target_value_low": float_or_none(step.get("custom_target_value_low")),
+                "custom_target_value_high": float_or_none(step.get("custom_target_value_high")),
+            }
+        )
+    return rows
+
+
+def sqlite_workout_split_rows(messages):
+    workout_splits = messages.get("split_mesgs", []) if messages else []
+    rows = []
+    for index, split in enumerate(workout_splits, start=1):
+        rows.append(
+            {
+                "split_index": index,
+                "source_message_index": int_or_none(split.get("message_index")),
+                "split_type": null_if_blank(split.get("split_type")),
+                "num_splits": int_or_none(split.get("num_splits")),
+                "total_distance_m": float_or_none(split.get("total_distance")),
+                "total_timer_time_sec": float_or_none(split.get("total_timer_time")),
+                "avg_speed_mps": float_or_none(split.get("avg_speed")),
+                "sport": null_if_blank(split.get("sport")),
+                "sub_sport": null_if_blank(split.get("sub_sport")),
+            }
+        )
+    return rows
+
+
+def sync_activity_workout_structure(connection, activity_id, messages):
+    structure_row = sqlite_workout_structure_row(messages)
+    workout_step_rows = sqlite_workout_step_rows(messages)
+    workout_split_rows = sqlite_workout_split_rows(messages)
+    columns = [
+        "activity_id",
+        "has_workout_structure",
+        "source",
+        "sport",
+        "sub_sport",
+        "workout_name",
+        "workout_description",
+        "num_valid_steps",
+    ]
+    connection.execute(
+        """
+        INSERT INTO activity_workout_structure (
+            activity_id,
+            has_workout_structure,
+            source,
+            sport,
+            sub_sport,
+            workout_name,
+            workout_description,
+            num_valid_steps,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(activity_id) DO UPDATE SET
+            has_workout_structure = excluded.has_workout_structure,
+            source = excluded.source,
+            sport = excluded.sport,
+            sub_sport = excluded.sub_sport,
+            workout_name = excluded.workout_name,
+            workout_description = excluded.workout_description,
+            num_valid_steps = excluded.num_valid_steps,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        [activity_id, *[structure_row[column] for column in columns[1:]]],
+    )
+    connection.execute("DELETE FROM activity_workout_step WHERE activity_id = ?", (activity_id,))
+    connection.execute("DELETE FROM activity_workout_split WHERE activity_id = ?", (activity_id,))
+
+    step_columns = [
+        "activity_id",
+        "step_index",
+        "source_message_index",
+        "intensity",
+        "duration_type",
+        "duration_value",
+        "duration_distance_m",
+        "duration_time_sec",
+        "target_type",
+        "target_value",
+        "target_value_low",
+        "target_value_high",
+        "target_hr_zone",
+        "repeat_steps",
+        "secondary_target_value",
+        "custom_target_value_low",
+        "custom_target_value_high",
+    ]
+    split_columns = [
+        "activity_id",
+        "split_index",
+        "source_message_index",
+        "split_type",
+        "num_splits",
+        "total_distance_m",
+        "total_timer_time_sec",
+        "avg_speed_mps",
+        "sport",
+        "sub_sport",
+    ]
+    for step_row in workout_step_rows:
+        row = {"activity_id": activity_id, **step_row}
+        placeholders = ", ".join("?" for _ in step_columns)
+        connection.execute(
+            f"INSERT INTO activity_workout_step ({', '.join(step_columns)}) VALUES ({placeholders})",
+            [row[column] for column in step_columns],
+        )
+    for split_row in workout_split_rows:
+        row = {"activity_id": activity_id, **split_row}
+        placeholders = ", ".join("?" for _ in split_columns)
+        connection.execute(
+            f"INSERT INTO activity_workout_split ({', '.join(split_columns)}) VALUES ({placeholders})",
+            [row[column] for column in split_columns],
+        )
+    return {
+        "structure": structure_row,
+        "step_count": len(workout_step_rows),
+        "split_count": len(workout_split_rows),
+    }
 
 
 def ensure_sqlite_schema(connection, schema_path=SQLITE_SCHEMA_PATH):
@@ -2033,6 +2325,37 @@ def upsert_activity(connection, row):
     ).fetchone()[0]
 
 
+def find_existing_activity_id(connection, fit_path: Path, activity_row):
+    candidates = []
+    fit_sha = activity_row.get("fit_sha256")
+    garmin_activity_id = activity_row.get("garmin_activity_id")
+    source_file_name = fit_path.name
+    if fit_sha:
+        candidates.append(
+            connection.execute(
+                "SELECT id FROM activity WHERE fit_sha256 = ?",
+                (fit_sha,),
+            ).fetchone()
+        )
+    if garmin_activity_id:
+        candidates.append(
+            connection.execute(
+                "SELECT id FROM activity WHERE garmin_activity_id = ?",
+                (garmin_activity_id,),
+            ).fetchone()
+        )
+    candidates.append(
+        connection.execute(
+            "SELECT id FROM activity WHERE source_file_name = ?",
+            (source_file_name,),
+        ).fetchone()
+    )
+    for row in candidates:
+        if row:
+            return row[0]
+    return None
+
+
 def write_fit_to_sqlite(fit_path: Path, db_path: Path, metadata=None, fetch_weather=True, dropdown_options=None):
     dropdown_options = dropdown_options or load_dropdown_options()
     messages = decode_fit(fit_path)
@@ -2076,7 +2399,60 @@ def write_fit_to_sqlite(fit_path: Path, db_path: Path, metadata=None, fetch_weat
                 f"INSERT INTO kilometer_split ({', '.join(split_columns)}) VALUES ({placeholders})",
                 [row[column] for column in split_columns],
             )
+        sync_activity_workout_structure(connection, activity_id, messages)
     return db_path
+
+
+def refresh_sqlite_gps_and_workout_structure(fit_path: Path, db_path: Path, metadata=None, fetch_weather=True, dropdown_options=None):
+    dropdown_options = dropdown_options or load_dropdown_options()
+    messages = decode_fit(fit_path)
+    rows, session = build_rows(messages)
+    if not rows:
+        raise RuntimeError("No lap data found in FIT file.")
+    metadata = finalized_metadata(metadata or {}, messages, session, rows, fit_path, fetch_weather, dropdown_options)
+    activity_row = sqlite_activity_row(fit_path, messages, session, rows, metadata)
+
+    bootstrap_sqlite_state(db_path, dropdown_options)
+    with sqlite3.connect(db_path) as connection:
+        activity_id = find_existing_activity_id(connection, fit_path, activity_row)
+        if activity_id is None:
+            return {
+                "status": "missing_activity",
+                "activity_id": None,
+                "gps_updated": False,
+                "workout_structure_updated": False,
+            }
+        connection.execute(
+            """
+            UPDATE activity
+            SET fit_sha256 = ?,
+                garmin_activity_id = COALESCE(garmin_activity_id, ?),
+                source_file_name = ?,
+                start_latitude = ?,
+                start_longitude = ?,
+                end_latitude = ?,
+                end_longitude = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                activity_row.get("fit_sha256"),
+                activity_row.get("garmin_activity_id"),
+                fit_path.name,
+                activity_row.get("start_latitude"),
+                activity_row.get("start_longitude"),
+                activity_row.get("end_latitude"),
+                activity_row.get("end_longitude"),
+                activity_id,
+            ),
+        )
+        sync_activity_workout_structure(connection, activity_id, messages)
+    return {
+        "status": "updated",
+        "activity_id": activity_id,
+        "gps_updated": True,
+        "workout_structure_updated": True,
+    }
 
 
 def create_workbook(fit_path: Path, output_path: Path, metadata=None, fetch_weather=True, dropdown_options=None):
@@ -2090,7 +2466,8 @@ def create_workbook(fit_path: Path, output_path: Path, metadata=None, fetch_weat
     wb = Workbook()
     ws = wb.active
     ws.title = "每公里數據"
-    add_metadata_sheet(wb, metadata, fit_path, session, rows, dropdown_options)
+    add_metadata_sheet(wb, metadata, fit_path, session, rows, messages.get("record_mesgs", []), dropdown_options)
+    add_workout_structure_sheet(wb, messages)
     date_label = activity_date(session, fit_path)
     ws["A1"] = f"{WORKBOOK_VERSION_NAME} - {date_label} (資料來源: {fit_path.name})"
     ws.append(HEADERS)

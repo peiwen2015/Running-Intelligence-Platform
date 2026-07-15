@@ -742,7 +742,15 @@ def coach_prompt_reference_lines(surface_label, primary_output, analysis_outline
     return lines
 
 
-def activity_daily_training_card_prompt(activity, review, weekly_review=None, monthly_overview=None):
+def activity_daily_training_card_prompt(
+    activity,
+    review,
+    split_rows=None,
+    workout_split_rows=None,
+    weekly_review=None,
+    monthly_overview=None,
+    saved_reply=None,
+):
     if not activity or not review:
         return ""
 
@@ -787,12 +795,42 @@ def activity_daily_training_card_prompt(activity, review, weekly_review=None, mo
     power_text = "" if power_value is None else format_number(power_value, 0)
     load_text = format_number(activity["training_load"], 0) or "—"
     recovery_text = raw_text(activity["recovery_time_hr"])
+    cause_lines = [f"- {card['title']}：{card['value']}；{card['note']}" for card in review.get("cards", [])]
+    segment_lines = []
+    for row in activity_key_segments(activity, split_rows or [], workout_split_rows or []):
+        segment_lines.append(
+            f"- {row['label']}（{row['section']}）：{row['metric']}；{row['note']}"
+        )
+    workout_structure_lines = []
+    for row in (workout_split_rows or [])[:8]:
+        segment_type = workout_split_label(row)
+        distance_text = (
+            f"{format_number((row['total_distance_m'] or 0) / 1000, 2)} km"
+            if (row["total_distance_m"] or 0) >= 1000
+            else f"{format_number(row['total_distance_m'], 0)} m"
+        )
+        time_text = format_duration_hms(row["total_timer_time_sec"]) or "—"
+        pace_value = None if row["avg_speed_mps"] in (None, 0) else 1000.0 / float(row["avg_speed_mps"])
+        pace_label = format_pace_seconds(pace_value) or "—"
+        workout_structure_lines.append(
+            f"- 片段 {row['split_index']}：{segment_type}，{distance_text}，{time_text}，配速 {pace_label}"
+        )
+    has_previous_ai_reply = bool(saved_reply and saved_reply.get("responseMarkdown"))
 
     prompt_lines = [
-        "請依據今日跑步分析資料產生一張專業風 Facebook 圖卡。",
-        "版型：16:9 橫式，深藍／藍灰科技感背景，Garmin Connect + Runalyze 風格，資訊清楚、專業、乾淨，不要可愛風或漫畫風。",
-        "若地點未提供，請寫「未提供」，不要自行猜測。",
-        "請固定使用以下架構：1. 今日摘要 2. 課表完成度 3. 配速策略 4. 心肺負荷 5. 功率與跑步經濟性 6. Stamina 7. Garmin 指標 8. 教練判斷 9. 下一步建議。",
+        "請把以下跑步分析資料整理成一張可直接發布的每日訓練圖卡內容。",
+        "輸出目標：16:9 橫式 Facebook 圖卡，深藍／藍灰科技感背景，專業、清楚、乾淨，接近 Garmin Connect + Runalyze 的資訊設計感。",
+        "請不要畫成可愛風、漫畫風，也不要加入未提供的跑者故事、心情、身體狀態或訓練背景。",
+        "若資料不足，請明確寫「未提供」或保守處理，不要自行猜測。",
+        "請把內容整理成真正適合放進圖卡的文案與區塊，不要只是把欄位逐條重貼。",
+        "請固定使用以下圖卡架構：1. 今日摘要 2. 課表完成度 3. 配速策略 4. 心肺負荷 5. 功率與跑步經濟性 6. Stamina 7. Garmin 指標 8. 教練判斷 9. 下一步建議。",
+        "",
+        "## 產出要求",
+        "- 每個區塊請用可上卡的短文案呈現，不要寫成長篇報告。",
+        "- 整體語氣要像專業跑步教練，不要像資料庫或系統說明。",
+        "- 若課表片段表存在，請先用它理解主體課程，再用 raw split 補證據。",
+        "- 不要把 warm-up、recovery、stride、cool-down 誤寫成今天的主體刺激。",
+        "- 最後請補一行適合放在卡片底部的收尾句。",
         "",
         "## 今日摘要",
         f"- 標題：今日跑步分析",
@@ -802,16 +840,28 @@ def activity_daily_training_card_prompt(activity, review, weekly_review=None, mo
         f"- 課表類型 / 訓練目的：{workout_text} / {purpose_text}",
         f"- 核心數據：距離 {distance_text}，時間 {duration_text}，平均配速 {pace_text}，平均心率 {hr_text or '—'}，平均功率 {power_text or '—'}，Training Load {load_text}，Recovery Time {recovery_text}",
         "",
-        "## 今日分析三點",
-        f"- 配速策略：{review.get('learning', '請根據資料分析前後段配速與是否符合目的。')}",
-        f"- 心率控制：{review.get('why', '請根據資料分析心率變化、漂移與環境影響。')}",
-        f"- 跑姿效率：{review.get('looking_forward', '請根據資料分析步頻、步幅、接地時間與垂直振幅。')}",
+        "## 平台已整理的教練判讀",
+        f"- 這堂課先回答的問題：{review.get('learning_question', '—')}",
+        f"- Learning：{review.get('learning', '請根據資料分析前後段配速與是否符合目的。')}",
+        f"- Focus：{review.get('focus', '請整理這堂課真正留下來的是什麼。')}",
+        f"- Why：{review.get('why', '請根據資料分析心率變化、漂移與環境影響。')}",
+        f"- Next：{review.get('looking_forward', '請根據資料分析步頻、步幅、接地時間與垂直振幅。')}",
         "",
-        "## 教練建議",
+        "## 圖卡要強調的三件事",
+        f"- 配速策略：{review.get('learning', '請根據資料分析前後段配速與是否符合目的。')}",
+        f"- 身體反應：{review.get('why', '請根據資料分析心率變化、漂移與環境影響。')}",
+        f"- 下一步方向：{review.get('looking_forward', '請根據資料分析步頻、步幅、接地時間與垂直振幅。')}",
+        "",
+        "## 課表結構與證據使用規則",
+        "- 若有課表片段表，請優先把 WU / Main / Recovery / CD 當成主結構來理解今天這堂課。",
+        "- raw split 只能拿來補充證據，不要把 recovery、stride 或 cool-down 誤當成主體刺激。",
+        "- 如果平台判讀與你從資料看到的內容有落差，請保守處理，避免寫成過度確定的句子。",
+        "",
+        "## 卡片中的教練建議",
         f"- 恢復或下一堂課建議：{weekly_review.get('looking_forward') if weekly_review and weekly_review.get('looking_forward') else (monthly_overview.get('looking_forward') if monthly_overview and monthly_overview.get('looking_forward') else '請依今天的訓練刺激給出恢復或下一堂課建議。')}",
         "",
-        "## 底部一句總結",
-        "- 用一句有教練感的結論文字收尾，避免太長。",
+        "## 收尾句",
+        "- 請用一句短而有教練感的結論文字收尾，像是今天真正留下來的是什麼，或明天會因此更懂什麼。",
         "",
         "## 風格要求",
         "- 繁體中文",
@@ -819,6 +869,33 @@ def activity_daily_training_card_prompt(activity, review, weekly_review=None, mo
         "- 不要塞太多小字",
         "- 若資料不足，明確標示未提供，不要捏造",
     ]
+
+    if workout_structure_lines:
+        prompt_lines.extend([
+            "",
+            "## 課表片段表",
+            *workout_structure_lines,
+        ])
+    if review.get("structure_note"):
+        prompt_lines.extend([
+            "",
+            "## 課表判讀口徑",
+            f"- {review['structure_note']}",
+        ])
+
+    if cause_lines:
+        prompt_lines.extend([
+            "",
+            "## 平台判讀依據",
+            *cause_lines,
+        ])
+
+    if segment_lines:
+        prompt_lines.extend([
+            "",
+            "## 關鍵片段",
+            *segment_lines,
+        ])
 
     if weekly_review:
         prompt_lines.extend([
@@ -832,6 +909,308 @@ def activity_daily_training_card_prompt(activity, review, weekly_review=None, mo
             f"- 月回顧脈絡：{monthly_overview.get('verdict') or '—'}",
             f"- 月回顧摘要：{monthly_overview.get('verdict_reason') or '—'}",
         ])
+
+    if has_previous_ai_reply:
+        prompt_lines.extend([
+            "",
+            "## 已保存的前一次 AI 延伸分析",
+            "- 下面這段只能當補充脈絡，不能覆蓋平台事實。",
+            "- 若這段與本次平台資料不一致，請以本次平台資料為準。",
+            saved_reply["responseMarkdown"],
+        ])
+
+    prompt_lines.extend([
+        "",
+        "## 最後提醒",
+        "- 如果平台沒有先跑過 AI 延伸分析，也請直接根據上面的平台判讀、課表片段與關鍵片段生成圖卡內容。",
+        "- 不要因為缺少額外 AI 回覆，就自行補足不存在的背景故事。",
+        "- 請優先做出一張資訊清楚、教練感明確的圖卡，而不是一張把所有數字塞滿的報表。",
+    ])
+
+    return "\n".join(prompt_lines)
+
+
+def weekly_training_card_prompt(
+    weekly,
+    intelligence,
+    review,
+    distribution_rows,
+    key_session_rows,
+    workout_structure_summary_rows,
+    knowledge_summary=None,
+    monthly_overview=None,
+    saved_reply=None,
+):
+    if not weekly or not intelligence or not review:
+        return ""
+
+    period_text = f"{weekly['start_date']} – {weekly['end_date']}"
+    total_km = f"{format_number(weekly['total_km'], 1)} km"
+    load_text = format_number(weekly["training_load"], 0) or "—"
+    activities_text = str(weekly["activities"] or 0)
+    avg_pace_text = format_pace_seconds(weekly["avg_pace_sec_per_km"]) or "—"
+    avg_hr_text = "" if weekly["avg_hr"] is None else str(int(round(weekly["avg_hr"])))
+    confidence = "High"
+    if intelligence["load_delta"] is None or intelligence["km_delta"] is None:
+        confidence = "Medium"
+
+    key_session_lines = []
+    seen = set()
+    for row in key_session_rows or []:
+        activity_id = row["activity_id"]
+        if activity_id in seen:
+            continue
+        seen.add(activity_id)
+        key_session_lines.append(
+            f"- {format_short_datetime(row['activity_start_time'])} {str(row['activity_name'] or row['activity_type'] or '活動')}："
+            f"{str(row['workout_type_name_en'] or '未標註')}，{format_number(row['distance_km'], 2)} km，"
+            f"配速 {format_pace_seconds(row['avg_pace_sec_per_km']) or '—'}，負荷 {format_number(row['training_load'], 1) or '—'}"
+        )
+        if len(key_session_lines) >= 4:
+            break
+
+    pattern_insights = workout_structure_pattern_insights(workout_structure_summary_rows, "本週")
+
+    prompt_lines = [
+        "請把以下週訓練分析整理成一張可直接發布的週訓練圖卡內容。",
+        "輸出目標：16:9 橫式 Facebook 圖卡，深藍／藍灰科技感背景，專業、清楚、乾淨，不要可愛風、漫畫風或過度裝飾。",
+        "請只根據我提供的內容整理，不要自行補故事、情緒、傷病、恢復狀態或未提供的訓練背景。",
+        "如果資料不足，請保守處理並明確寫未提供，不要硬推論。",
+        "請把內容整理成真正適合上圖卡的短文案，不要把完整分析逐段重貼。",
+        "請固定使用以下圖卡架構：1. 本週摘要 2. 本週位置 3. 結構重點 4. 關鍵課 5. Coach Knowledge 6. 下週提醒。",
+        "",
+        "## 本週摘要",
+        f"- 標題：本週訓練回顧",
+        f"- 週期：{period_text}",
+        f"- 活動數：{activities_text}",
+        f"- 里程：{total_km}",
+        f"- 負荷：{load_text}",
+        f"- 平均配速 / 平均心率：{avg_pace_text} / {avg_hr_text or '—'}",
+        "",
+        "## 平台已整理的週判讀",
+        f"- Verdict：{review['verdict']}",
+        f"- Confidence：{confidence}",
+        f"- Learning：{review['learning']}",
+        f"- Focus：{review['focus']}",
+        f"- Why：{review['why']}",
+        f"- Next：{review['looking_forward']}",
+        "",
+        "## 圖卡要強調的三件事",
+        f"- 這週真正留下來的是什麼：{review['learning']}",
+        f"- 為什麼平台會這樣判讀：{review['why']}",
+        f"- 下週應該記住什麼：{review['looking_forward']}",
+    ]
+
+    if knowledge_summary:
+        prompt_lines.extend([
+            "",
+            "## Coach Knowledge",
+            f"- Headline：{knowledge_summary['headline']}",
+            f"- Detail：{knowledge_summary['detail']}",
+        ])
+
+    if pattern_insights or workout_structure_summary_rows:
+        prompt_lines.extend([
+            "",
+            "## 課表結構重點",
+            "- 這裡要用教練語氣整理本週課表型態，不要只列名稱。",
+        ])
+        prompt_lines.extend(f"- {line}" for line in pattern_insights)
+        for row in workout_structure_summary_rows[:4]:
+            prompt_lines.append(
+                f"- {row['date']} {row['activity']}（{row['workout']}）：{row['summary']}"
+            )
+
+    if key_session_lines:
+        prompt_lines.extend([
+            "",
+            "## 關鍵課",
+            *key_session_lines,
+        ])
+
+    if monthly_overview:
+        prompt_lines.extend([
+            "",
+            "## 月脈絡",
+            f"- 這週所在的月度位置：{monthly_overview.get('verdict') or '—'}",
+            f"- 月度摘要：{monthly_overview.get('verdict_reason') or '—'}",
+        ])
+
+    if saved_reply and saved_reply.get("responseMarkdown"):
+        prompt_lines.extend([
+            "",
+            "## 已保存的前一次 AI 延伸分析",
+            "- 以下只能當補充脈絡，不能覆蓋平台事實。",
+            saved_reply["responseMarkdown"],
+        ])
+
+    prompt_lines.extend([
+        "",
+        "## 風格要求",
+        "- 繁體中文",
+        "- 每個區塊請寫成能直接放上圖卡的短句",
+        "- 整體語氣要像專業跑步教練，不像系統報表",
+        "- 不要把所有數字塞滿，重點是讓人一眼看懂這週學到了什麼",
+        "- 最後請補一行適合放在卡片底部的收尾句",
+    ])
+
+    return "\n".join(prompt_lines)
+
+
+def monthly_training_card_prompt(
+    monthly,
+    intelligence,
+    progress_row,
+    distribution_rows,
+    key_session_rows,
+    workout_structure_summary_rows,
+    related_week_rows,
+    coach_memory=None,
+    knowledge_summary=None,
+    saved_reply=None,
+):
+    if not monthly or not intelligence:
+        return ""
+
+    progress_pct = progress_row["progress_pct"] if progress_row else None
+    quality_sessions = int(progress_row["current_quality_sessions"] or 0) if progress_row else 0
+    long_runs = int(progress_row["current_long_runs"] or 0) if progress_row else 0
+
+    if quality_sessions >= 3:
+        phase = "品質建構"
+    elif long_runs >= 2:
+        phase = "耐力累積"
+    elif quality_sessions >= 1:
+        phase = "平衡建構"
+    else:
+        phase = "基礎累積"
+
+    if intelligence["is_partial_month"]:
+        verdict = "正常"
+        verdict_reason = (
+            f"目前仍屬於正常累積。因為本月只完成 {format_number(progress_pct, 0)}%，目前負荷與里程都還在可接受區間。"
+        )
+    elif intelligence["load_delta"] is not None and intelligence["load_delta"] < -15:
+        verdict = "吸收月"
+        verdict_reason = "本月整體偏向吸收與調整，負荷低於近期平均，但方向仍然合理。"
+    elif intelligence["load_delta"] is not None and intelligence["load_delta"] > 15:
+        verdict = "負荷建構"
+        verdict_reason = "本月負荷高於近期平均，代表正處於明顯的建構期，恢復品質會變得更重要。"
+    else:
+        verdict = "平衡建構"
+        verdict_reason = "本月方向整體平衡，里程、品質課與長跑配置都還在合理範圍內。"
+
+    confidence = "Medium" if intelligence["is_partial_month"] else "High"
+    pattern_insights = workout_structure_pattern_insights(workout_structure_summary_rows, "本月")
+
+    key_session_lines = []
+    seen = set()
+    for row in key_session_rows or []:
+        activity_id = row["activity_id"]
+        if activity_id in seen:
+            continue
+        seen.add(activity_id)
+        key_session_lines.append(
+            f"- {format_short_datetime(row['activity_start_time'])} {str(row['activity_name'] or row['activity_type'] or '活動')}："
+            f"{str(row['workout_type_name_en'] or '未標註')}，{format_number(row['distance_km'], 2)} km，"
+            f"配速 {format_pace_seconds(row['avg_pace_sec_per_km']) or '—'}，負荷 {format_number(row['training_load'], 1) or '—'}"
+        )
+        if len(key_session_lines) >= 4:
+            break
+
+    week_lines = []
+    for row in related_week_rows or []:
+        week_lines.append(
+            f"- {row['start_date']} – {row['end_date']}：{str(row['verdict'] or '本週')}，"
+            f"活動 {row['activities']}，{format_number(row['total_km'], 2) or '—'} km，"
+            f"負荷 {format_number(row['training_load'], 1) or '—'}"
+        )
+        if len(week_lines) >= 4:
+            break
+
+    prompt_lines = [
+        "請把以下月訓練分析整理成一張可直接發布的月訓練圖卡內容。",
+        "輸出目標：16:9 橫式 Facebook 圖卡，深藍／藍灰科技感背景，專業、清楚、乾淨，不要可愛風、漫畫風或過度裝飾。",
+        "請只根據我提供的內容整理，不要自行補故事、情緒、傷病、恢復狀態或未提供的訓練背景。",
+        "如果月份仍在進行中，請把它寫成進度點，不要假裝是完整月總結。",
+        "請把內容整理成真正適合上圖卡的短文案，不要把完整分析逐段重貼。",
+        "請固定使用以下圖卡架構：1. 本月摘要 2. 本月位置 3. 課表型態 4. 關鍵週與關鍵課 5. Coach Knowledge 6. 下月提醒。",
+        "",
+        "## 本月摘要",
+        f"- 標題：本月訓練回顧",
+        f"- 月份：{monthly['month_key']}",
+        f"- 狀態：{'進行中' if intelligence['is_partial_month'] else '完整'}",
+        f"- 里程：{format_number(monthly['total_km'], 1)} km",
+        f"- 時間：{format_duration_hms(monthly['total_time_sec']) or '—'}",
+        f"- 負荷：{format_number(monthly['training_load'], 0) or '—'}",
+        f"- 活動數：{monthly['activities'] or 0}",
+        f"- 平均配速 / 平均心率：{format_pace_seconds(monthly['avg_pace_sec_per_km']) or '—'} / {'' if monthly['avg_hr'] is None else int(round(monthly['avg_hr']))}",
+        f"- 品質課 / 長跑：{quality_sessions} / {long_runs}",
+        "",
+        "## 平台已整理的月判讀",
+        f"- Position：{verdict}",
+        f"- Phase：{phase}",
+        f"- Confidence：{confidence}",
+        f"- Verdict Reason：{verdict_reason}",
+    ]
+
+    if coach_memory:
+        prompt_lines.extend([
+            f"- Previous Month：{coach_memory.get('previous_month_key') or '—'}",
+            f"- Follow-up：{coach_memory.get('follow_up') or '—'}",
+        ])
+
+    if knowledge_summary:
+        prompt_lines.extend([
+            "",
+            "## Coach Knowledge",
+            f"- Headline：{knowledge_summary['headline']}",
+            f"- Detail：{knowledge_summary['detail']}",
+        ])
+
+    if pattern_insights or workout_structure_summary_rows:
+        prompt_lines.extend([
+            "",
+            "## 課表型態重點",
+            "- 這裡要先整理本月代表型態在做什麼，不要只列課名或課表代號。",
+        ])
+        prompt_lines.extend(f"- {line}" for line in pattern_insights)
+        for row in workout_structure_summary_rows[:4]:
+            prompt_lines.append(
+                f"- {row['date']} {row['activity']}（{row['workout']}）：{row['summary']}"
+            )
+
+    if week_lines:
+        prompt_lines.extend([
+            "",
+            "## 關鍵週",
+            *week_lines,
+        ])
+
+    if key_session_lines:
+        prompt_lines.extend([
+            "",
+            "## 關鍵課",
+            *key_session_lines,
+        ])
+
+    if saved_reply and saved_reply.get("responseMarkdown"):
+        prompt_lines.extend([
+            "",
+            "## 已保存的前一次 AI 延伸分析",
+            "- 以下只能當補充脈絡，不能覆蓋平台事實。",
+            saved_reply["responseMarkdown"],
+        ])
+
+    prompt_lines.extend([
+        "",
+        "## 風格要求",
+        "- 繁體中文",
+        "- 每個區塊請寫成能直接放上圖卡的短句",
+        "- 整體語氣要像專業跑步教練，不像系統報表",
+        "- 不要把所有數字塞滿，重點是讓人一眼看懂這個月走到哪裡",
+        "- 最後請補一行適合放在卡片底部的收尾句",
+    ])
 
     return "\n".join(prompt_lines)
 
@@ -2884,23 +3263,133 @@ def activity_split_summary(split_rows):
     }
 
 
+def activity_focus_splits(activity, split_rows, workout_split_rows=None):
+    structured_rows = structured_focus_splits(split_rows, workout_split_rows or [])
+    if structured_rows:
+        return structured_rows
+    analysis_rows = activity_analysis_splits(split_rows)
+    if not analysis_rows:
+        return []
+    workout = str(activity["workout_type_name_en"] or activity["activity_type"] or "").lower()
+    threshold_workout = any(token in workout for token in ("tempo", "threshold", "marathon pace"))
+    interval_workout = any(token in workout for token in ("interval", "repetition", "fartlek"))
+    quality_workout = threshold_workout or interval_workout
+    long_run = any(token in workout for token in ("long run", "lsd")) or float(activity["distance_km"] or 0) >= 18
+    easy_run = any(token in workout for token in ("easy", "recovery"))
+    if quality_workout:
+        if threshold_workout and len(analysis_rows) >= 10:
+            return analysis_rows[2:-2]
+        if interval_workout and len(analysis_rows) >= 8:
+            return analysis_rows[1:-1]
+        if len(analysis_rows) >= 8:
+            return analysis_rows[2:-2]
+        if len(analysis_rows) >= 6:
+            return analysis_rows[1:-1]
+    if long_run:
+        if len(analysis_rows) >= 10:
+            return analysis_rows[1:-1]
+        if len(analysis_rows) >= 6:
+            return analysis_rows[1:]
+    if easy_run and len(analysis_rows) >= 6:
+        return analysis_rows[1:-1]
+    return analysis_rows
+
+
+def activity_focus_segment_labels(activity, focus_rows, all_rows, workout_split_rows=None):
+    if not focus_rows:
+        return {
+            "start": "起跑節奏",
+            "middle": "中段反應",
+            "finish": "收尾狀態",
+        }
+    if structured_focus_splits(all_rows, workout_split_rows or []):
+        return {
+            "start": "主段起點",
+            "middle": "主段中段",
+            "finish": "主段收尾",
+        }
+    if len(focus_rows) == len(all_rows):
+        return {
+            "start": "起跑節奏",
+            "middle": "中段反應",
+            "finish": "收尾狀態",
+        }
+    workout = str(activity["workout_type_name_en"] or activity["activity_type"] or "").lower()
+    threshold_workout = any(token in workout for token in ("tempo", "threshold", "marathon pace"))
+    interval_workout = any(token in workout for token in ("interval", "repetition", "fartlek"))
+    quality_workout = threshold_workout or interval_workout
+    long_run = any(token in workout for token in ("long run", "lsd")) or float(activity["distance_km"] or 0) >= 18
+    if quality_workout:
+        return {
+            "start": "主體起點",
+            "middle": "主體中段",
+            "finish": "主體收尾",
+        }
+    if long_run:
+        return {
+            "start": "耐力進入點",
+            "middle": "耐力中段",
+            "finish": "耐力後段",
+        }
+    return {
+        "start": "進入主體",
+        "middle": "主體中段",
+        "finish": "離開主體前",
+    }
+
+
+def split_segment_kind(row):
+    distance_m = float(row["split_distance_m"] or 0)
+    elapsed_sec = float(row["elapsed_time_sec"] or 0)
+    if distance_m <= 0:
+        return "unknown"
+    if distance_m < 30 or (distance_m < 60 and elapsed_sec <= 10):
+        return "residual"
+    if distance_m < 150 and elapsed_sec <= 30:
+        return "stride"
+    if distance_m < 400 and 45 <= elapsed_sec <= 120:
+        return "recovery"
+    if distance_m < 200:
+        return "short"
+    return "main"
+
+
 def is_residual_split(row, min_distance_m=200):
-    distance_m = row["split_distance_m"] or 0
-    return float(distance_m) < float(min_distance_m)
+    return split_segment_kind(row) != "main"
 
 
 def activity_analysis_splits(split_rows):
     if not split_rows:
         return []
-    full_rows = [row for row in split_rows if not is_residual_split(row)]
+    full_rows = [row for row in split_rows if split_segment_kind(row) == "main"]
     return full_rows or split_rows
 
 
-def activity_split_label(row):
-    if is_residual_split(row):
+def use_km_labels_for_split_rows(split_rows):
+    main_rows = [row for row in (split_rows or []) if split_segment_kind(row) == "main"]
+    if not main_rows:
+        return False
+    return all(980 <= float(row["split_distance_m"] or 0) <= 1020 for row in main_rows)
+
+
+def activity_split_label(row, split_rows=None):
+    kind = split_segment_kind(row)
+    distance_m = float(row["split_distance_m"] or 0)
+    if kind == "stride":
+        seconds = format_number(row["elapsed_time_sec"], 0) or ""
+        return f"Stride 段（{seconds}s）" if seconds else "Stride 段"
+    if kind == "recovery":
+        seconds = format_number(row["elapsed_time_sec"], 0) or ""
+        return f"恢復段（{seconds}s）" if seconds else "恢復段"
+    if kind == "short":
+        distance_m = format_number(row["split_distance_m"], 0) or "0"
+        return f"短片段（{distance_m} m）"
+    if kind == "residual":
         distance_m = format_number(row["split_distance_m"], 0) or "0"
         return f"尾端殘段（{distance_m} m）"
-    return f"KM {row['split_index']}"
+    if 980 <= distance_m <= 1020 and use_km_labels_for_split_rows(split_rows):
+        return f"KM {row['split_index']}"
+    return f"片段 {row['split_index']}"
 
 
 def split_total_time_sec(split_rows):
@@ -2945,7 +3434,7 @@ def split_activity_metric_avg(split_rows, key):
     return (sum(values) / len(values)) if values else None
 
 
-def activity_review_payload(activity, split_rows):
+def activity_review_payload(activity, split_rows, workout_split_rows=None):
     workout = str(activity["workout_type_name_en"] or activity["activity_type"] or "").lower()
     distance = float(activity["distance_km"] or 0)
     training_load = float(activity["training_load"] or 0)
@@ -2955,7 +3444,20 @@ def activity_review_payload(activity, split_rows):
     stamina_drop = None
     if stamina_start is not None and stamina_end is not None:
         stamina_drop = float(stamina_start) - float(stamina_end)
-    split_summary = activity_split_summary(split_rows)
+    structured_focus = structured_focus_splits(split_rows, workout_split_rows or [])
+    structured_active_rows = structured_active_segment_rows(workout_split_rows or [])
+    has_structured_recovery = any(
+        workout_segment_kind(row) == "recovery" for row in (workout_split_rows or [])
+    )
+    has_short_active_segments = any(
+        workout_segment_kind(row) == "active"
+        and float(row["total_distance_m"] or 0) < 300
+        and float(row["total_timer_time_sec"] or 0) <= 30
+        for row in (workout_split_rows or [])
+    )
+    displayed_workout_rows = display_workout_splits(workout_split_rows or [])
+    focus_rows = activity_focus_splits(activity, split_rows, workout_split_rows)
+    split_summary = activity_split_summary(focus_rows or split_rows)
     pace_change = split_summary["pace_change_sec"]
     hr_change = split_summary["hr_change"]
     is_hot = temperature is not None and float(temperature) >= 28
@@ -2981,6 +3483,10 @@ def activity_review_payload(activity, split_rows):
         learning = "你練到的不是單純達標。你練到的是：在後半段仍然守住節奏。"
         focus = "這堂課真正留下來的，是品質節奏。"
         reminder = "下一堂課，只記住一件事：把今天的刺激留住，不要急著再堆下一層。"
+    elif easy_run and has_short_active_segments:
+        learning = "你練到的不是單純把輕鬆跑做完。你練到的是：先把主體節奏跑穩，再用短加速把動作節奏接回來。"
+        focus = "這堂課真正留下來的，是穩定主體後把動作重新叫醒。"
+        reminder = "下一堂課，只記住一件事：先把 easy 的穩定感守住，再決定要不要把步伐打開。"
     elif easy_run:
         learning = "你練到的不是跑得更快。你練到的是：把節奏穩穩接回來。"
         focus = "這堂課真正留下來的，是接回節奏。"
@@ -2996,10 +3502,12 @@ def activity_review_payload(activity, split_rows):
         why = "這堂課真正有價值的地方，不只是刺激本身，而是你有沒有把刺激穩穩留到最後。"
     elif long_run:
         why = "這堂課真正重要的，不只是距離，而是耐力主線有沒有在後段繼續成立。"
+    elif easy_run and has_short_active_segments:
+        why = "這堂課真正有價值的地方，不只是前面的 easy 有沒有穩住，而是最後有沒有把快速動作節奏自然接回來。"
     else:
         why = "這堂課真正重要的，不是數字漂不漂亮，而是它有沒有替整體節奏留下東西。"
 
-    analysis_rows = activity_analysis_splits(split_rows)
+    analysis_rows = focus_rows or activity_analysis_splits(split_rows)
     last_split_index = analysis_rows[-1]["split_index"] if analysis_rows else None
     middle_split_index = analysis_rows[len(analysis_rows) // 2]["split_index"] if len(analysis_rows) >= 3 else last_split_index
 
@@ -3007,11 +3515,44 @@ def activity_review_payload(activity, split_rows):
     if analysis_rows:
         if pace_change is not None:
             pace_label = "後段仍穩" if pace_change <= 8 else "後段回落"
-            pace_note = (
-                f"第一公里到最後一公里約慢了 {format_number(abs(pace_change), 0)} 秒。"
-                if pace_change >= 0 else
-                f"最後一公里仍比開頭快 {format_number(abs(pace_change), 0)} 秒。"
-            )
+            if structured_active_rows:
+                first_active = structured_active_rows[0]
+                last_active = structured_active_rows[-1]
+                first_active_pace = None if first_active["avg_speed_mps"] in (None, 0) else 1000.0 / float(first_active["avg_speed_mps"])
+                last_active_pace = None if last_active["avg_speed_mps"] in (None, 0) else 1000.0 / float(last_active["avg_speed_mps"])
+                active_change = None
+                if first_active_pace is not None and last_active_pace is not None:
+                    active_change = float(last_active_pace) - float(first_active_pace)
+                trailing_note = ""
+                if len(structured_active_rows) >= 2:
+                    previous_active = structured_active_rows[-2]
+                    previous_active_pace = None if previous_active["avg_speed_mps"] in (None, 0) else 1000.0 / float(previous_active["avg_speed_mps"])
+                    if previous_active_pace is not None and last_active_pace is not None:
+                        trailing_change = float(last_active_pace) - float(previous_active_pace)
+                        if abs(trailing_change) <= 3:
+                            trailing_note = "但後半段已重新穩定，最後一組沒有再明顯回落。"
+                            pace_label = "先回落後穩住"
+                if len(structured_active_rows) == 1 and pace_change is not None:
+                    active_change = pace_change
+                if active_change is not None:
+                    segment_scope = (
+                        "第一組主段到最後一組主段"
+                        if len(structured_active_rows) >= 2 and has_structured_recovery
+                        else "主段前段到主段後段"
+                    )
+                    pace_note = (
+                        f"{segment_scope}約慢了 {format_number(abs(active_change), 0)} 秒。{trailing_note}".strip()
+                        if active_change >= 0 else
+                        f"{segment_scope}最後仍比前段快 {format_number(abs(active_change), 0)} 秒。"
+                    )
+                else:
+                    pace_note = "主段節奏有變化，但目前還不能完整比較第一組與最後一組。"
+            else:
+                pace_note = (
+                    f"第一公里到最後一公里約慢了 {format_number(abs(pace_change), 0)} 秒。"
+                    if pace_change >= 0 else
+                    f"最後一公里仍比開頭快 {format_number(abs(pace_change), 0)} 秒。"
+                )
         else:
             pace_label = "節奏待補"
             pace_note = "目前還沒有足夠 split 可以比較前後段。"
@@ -3021,7 +3562,7 @@ def activity_review_payload(activity, split_rows):
             "note": pace_note,
             "fragment_anchor": "#fragment-finish",
             "evidence_anchor": f"#split-{last_split_index}" if last_split_index is not None else "#activity-evidence",
-            "segment_label": "收尾狀態",
+            "segment_label": "主段收尾" if structured_focus else ("主體收尾" if focus_rows and len(focus_rows) != len(activity_analysis_splits(split_rows)) else "收尾狀態"),
         })
 
     if training_load:
@@ -3038,7 +3579,7 @@ def activity_review_payload(activity, split_rows):
             "note": load_note,
             "fragment_anchor": "#fragment-middle",
             "evidence_anchor": f"#split-{middle_split_index}" if middle_split_index is not None else "#activity-evidence",
-            "segment_label": "中段反應",
+            "segment_label": "主段中段" if structured_focus else ("主體中段" if focus_rows and len(focus_rows) != len(activity_analysis_splits(split_rows)) else "中段反應"),
         })
 
     if is_hot or stamina_drop is not None or hr_change is not None:
@@ -3048,10 +3589,11 @@ def activity_review_payload(activity, split_rows):
         if stamina_drop is not None:
             body_parts.append(f"Stamina -{format_number(stamina_drop, 0)}")
         if hr_change is not None:
+            hr_scope = "主段起點到主段收尾" if structured_focus else "首末完整公里"
             if hr_change >= 0:
-                body_parts.append(f"首末完整公里 HR +{format_number(hr_change, 0)} bpm")
+                body_parts.append(f"{hr_scope} HR +{format_number(hr_change, 0)} bpm")
             else:
-                body_parts.append(f"首末完整公里 HR {format_number(hr_change, 0)} bpm")
+                body_parts.append(f"{hr_scope} HR {format_number(hr_change, 0)} bpm")
         body_label = " · ".join(body_parts) if body_parts else "身體有回應"
         body_note = (
             "環境與身體回應一起決定了今天該怎麼理解，不只是看單一配速。"
@@ -3064,10 +3606,18 @@ def activity_review_payload(activity, split_rows):
             "note": body_note,
             "fragment_anchor": "#fragment-middle",
             "evidence_anchor": f"#split-{middle_split_index}" if middle_split_index is not None else "#activity-evidence",
-            "segment_label": "中段反應",
+            "segment_label": "主段中段" if structured_focus else ("主體中段" if focus_rows and len(focus_rows) != len(activity_analysis_splits(split_rows)) else "中段反應"),
         })
 
     evidence_intro = "我會這樣看，不是因為單一數字，而是因為這堂課的節奏、刺激與身體回應指向同一個學習。"
+    structure_note = ""
+    if displayed_workout_rows:
+        if easy_run and has_short_active_segments:
+            structure_note = "這堂課的主體先看 easy 段，課尾另有短加速與恢復片段，所以主體判讀不會把 stride 混進來。"
+        elif has_structured_recovery and len(structured_active_rows) >= 2:
+            structure_note = "這堂課有明確主段與恢復切分，所以判讀會先按課表結構理解，再回頭核對 raw split。"
+        elif structured_focus:
+            structure_note = "這堂課的判讀會先讀課表主體，再用 raw split 補證據，不會把暖身、恢復或收操混成同一段。"
 
     return {
         "learning_question": "這堂課，我真正練到了什麼？",
@@ -3076,8 +3626,10 @@ def activity_review_payload(activity, split_rows):
         "focus": focus,
         "why": why,
         "looking_forward": reminder,
+        "structure_note": structure_note,
         "evidence_intro": evidence_intro,
         "cards": cards[:3],
+        "reads_workout_structure": bool(structured_focus),
         "reasoning_steps": [
             ("先看學習", "#activity-learning"),
             ("再看形成原因", "#activity-cause"),
@@ -3425,12 +3977,11 @@ def monthly_distribution(connection, limit=8):
     ).fetchall()
 
 
-def selected_month_distribution(connection, month_key=None, limit=8):
+def selected_month_distribution(connection, month_key=None, limit=None):
     target_month = selected_month_summary(connection, month_key)
     if not target_month:
         return []
-    return connection.execute(
-        """
+    query = """
         SELECT
             COALESCE(activity_review_view.workout_type_name_en, 'Unassigned') AS workout_type_name_en,
             COALESCE(activity_review_view.primary_training_purpose_name_en, 'Unassigned') AS primary_training_purpose_name_en,
@@ -3443,10 +3994,12 @@ def selected_month_distribution(connection, month_key=None, limit=8):
             COALESCE(activity_review_view.workout_type_name_en, 'Unassigned'),
             COALESCE(activity_review_view.primary_training_purpose_name_en, 'Unassigned')
         ORDER BY total_km DESC, activity_count DESC
-        LIMIT ?
-        """,
-        (target_month["month_start"], target_month["month_end"], limit),
-    ).fetchall()
+    """
+    params = [target_month["month_start"], target_month["month_end"]]
+    if limit is not None:
+        query += "\nLIMIT ?"
+        params.append(limit)
+    return connection.execute(query, tuple(params)).fetchall()
 
 
 def selected_week_distribution(connection, week_offset=None, limit=6):
@@ -4949,6 +5502,139 @@ def splits(connection, activity_id):
     ).fetchall()
 
 
+def workout_structure_splits(connection, activity_id):
+    if not activity_id:
+        return []
+    return connection.execute(
+        """
+        SELECT
+            split_index,
+            split_type,
+            total_distance_m,
+            total_timer_time_sec,
+            avg_speed_mps
+        FROM activity_workout_split
+        WHERE activity_id = ?
+        ORDER BY split_index
+        """,
+        (activity_id,),
+    ).fetchall()
+
+
+def summarize_workout_structure_rows(workout_rows):
+    rows = display_workout_splits(workout_rows or [])
+    if not rows:
+        return ""
+    warmup_distance = 0.0
+    cooldown_distance = 0.0
+    main_distances = []
+    stride_count = 0
+    recovery_count = 0
+    recovery_distance = 0.0
+    other_parts = []
+    for row in rows:
+        kind = workout_segment_kind(row)
+        distance_m = float(row["total_distance_m"] or 0)
+        duration_sec = float(row["total_timer_time_sec"] or 0)
+        if kind == "warmup":
+            warmup_distance += distance_m
+            continue
+        if kind == "cooldown":
+            cooldown_distance += distance_m
+            continue
+        if kind == "recovery":
+            recovery_count += 1
+            recovery_distance += distance_m
+            continue
+        if kind == "active":
+            if distance_m < 300 and duration_sec <= 30:
+                stride_count += 1
+            else:
+                main_distances.append(distance_m)
+            continue
+        label = str(workout_split_label(row) or "").strip()
+        if not label:
+            continue
+        if label.lower().startswith("rwd_"):
+            continue
+        other_parts.append(label)
+
+    parts = []
+    if warmup_distance > 0:
+        parts.append(f"WU {format_number(warmup_distance / 1000, 2)} km")
+    if main_distances:
+        if len(main_distances) == 1:
+            parts.append(f"主段 {format_number(main_distances[0] / 1000, 2)} km")
+        else:
+            main_km = " / ".join(format_number(distance / 1000, 2) for distance in main_distances[:4])
+            suffix = " ..." if len(main_distances) > 4 else ""
+            parts.append(f"主段 {len(main_distances)} 組（{main_km} km{suffix}）")
+    if stride_count:
+        stride_text = f"{stride_count} 次 Stride"
+        if recovery_count:
+            stride_text += f" + {recovery_count} 段恢復"
+        parts.append(stride_text)
+    elif recovery_count:
+        recovery_km = format_number(recovery_distance / 1000, 2) if recovery_distance > 0 else "—"
+        parts.append(f"{recovery_count} 段恢復（共 {recovery_km} km）")
+    if cooldown_distance > 0:
+        parts.append(f"CD {format_number(cooldown_distance / 1000, 2)} km")
+    if other_parts:
+        parts.append(" / ".join(other_parts[:2]))
+    return "；".join(parts)
+
+
+def key_session_workout_structure_summary(connection, key_session_rows, limit=4):
+    if not connection or not key_session_rows:
+        return []
+    summary_rows = []
+    seen = set()
+    for row in key_session_rows:
+        activity_id = row["activity_id"]
+        if not activity_id or activity_id in seen:
+            continue
+        seen.add(activity_id)
+        workout_rows = workout_structure_splits(connection, activity_id)
+        summary = summarize_workout_structure_rows(workout_rows)
+        if not summary:
+            continue
+        summary_rows.append({
+            "activity_id": activity_id,
+            "activity": str(row["activity_name"] or row["activity_type"] or "活動"),
+            "date": format_short_datetime(row["activity_start_time"]),
+            "workout": str(row["workout_type_name_en"] or "未標註"),
+            "summary": summary,
+        })
+        if len(summary_rows) >= limit:
+            break
+    return summary_rows
+
+
+def workout_structure_pattern_insights(summary_rows, period_label="本週"):
+    if not summary_rows:
+        return []
+    lines = []
+    has_stride = any("Stride" in row["summary"] for row in summary_rows)
+    interval_rows = [row for row in summary_rows if "主段 " in row["summary"] and "組（" in row["summary"]]
+    long_main_rows = []
+    for row in summary_rows:
+        summary = row["summary"]
+        if "主段 " in summary and "組（" not in summary and "Stride" not in summary:
+            long_main_rows.append(row)
+
+    if interval_rows:
+        workouts = "、".join(row["workout"] for row in interval_rows[:2])
+        lines.append(f"{period_label}的品質刺激不是單點出現，而是用明確主段組合反覆建立，像 {workouts} 這樣的課表型態很清楚。")
+    if has_stride:
+        lines.append(f"{period_label}不只是在累積主體里程，還有課尾短加速把動作節奏重新接回來。")
+    if long_main_rows:
+        workouts = "、".join(row["workout"] for row in long_main_rows[:2])
+        lines.append(f"{period_label}也保留了較長的連續主體，像 {workouts} 這類課表更像是在維持整體節奏與耐力主線。")
+    if not lines:
+        lines.append(f"{period_label}目前已有可辨識的課表型態，代表判讀不只是看課名，也開始看主段、恢復與收尾是怎麼組成的。")
+    return lines[:3]
+
+
 def chart_points(values, width, height, padding, lower_is_better=False):
     numeric = [float(value) if isinstance(value, (int, float)) else None for value in values]
     actual = [value for value in numeric if value is not None]
@@ -6220,6 +6906,7 @@ def weekly_ai_handoff_text(
     review,
     distribution_rows,
     key_session_rows,
+    workout_structure_summary_rows,
     history_rows,
     history_rows_with_labels=None,
     monthly_overview=None,
@@ -6394,6 +7081,18 @@ def weekly_ai_handoff_text(
             *key_session_lines,
         ])
 
+    if workout_structure_summary_rows:
+        pattern_insights = workout_structure_pattern_insights(workout_structure_summary_rows, "本週")
+        prompt_lines.extend([
+            "",
+            "## Workout Structure Patterns",
+        ])
+        prompt_lines.extend(f"- {line}" for line in pattern_insights)
+        for row in workout_structure_summary_rows:
+            prompt_lines.append(
+                f"- {row['date']} {row['activity']}（{row['workout']}）：{row['summary']}"
+            )
+
     if context_lines:
         prompt_lines.extend([
             "",
@@ -6468,6 +7167,7 @@ def weekly_ai_handoff_panel(
     review,
     distribution_rows,
     key_session_rows,
+    workout_structure_summary_rows,
     history_rows,
     history_rows_with_labels=None,
     monthly_overview=None,
@@ -6481,6 +7181,7 @@ def weekly_ai_handoff_panel(
         review,
         distribution_rows,
         key_session_rows,
+        workout_structure_summary_rows,
         history_rows,
         history_rows_with_labels,
         monthly_overview,
@@ -6488,6 +7189,17 @@ def weekly_ai_handoff_panel(
         knowledge_summary,
         include_raw_data=True,
         saved_reply=saved_reply,
+    )
+    weekly_card_prompt = weekly_training_card_prompt(
+        weekly,
+        intelligence,
+        review,
+        distribution_rows,
+        key_session_rows,
+        workout_structure_summary_rows,
+        knowledge_summary,
+        monthly_overview,
+        saved_reply,
     )
     if not handoff_text:
         return ""
@@ -6521,12 +7233,33 @@ def weekly_ai_handoff_panel(
           </div>
           <p class="note" id="weekly-ai-handoff-status">先看完這週，再複製交給你習慣的 AI 繼續分析。</p>
         </div>
+        <div class="review-card ai-handoff-card">
+          <span>Weekly Training Card Prompt</span>
+          <strong>把這週分析交給圖像 AI 做成週訓練圖卡</strong>
+          <p>這個 prompt 會把本週位置、課表型態、關鍵課與下週提醒整理成適合 16:9 圖卡的文案。</p>
+          <div class="ai-handoff-block">
+            <div class="ai-handoff-block-head">
+              <div>
+                <strong>週圖卡 prompt</strong>
+                <p class="note">不會直接重貼完整 handoff，而是改寫成適合圖像 AI 的圖卡內容。</p>
+              </div>
+              <div class="ai-handoff-actions">
+                <button class="secondary-action" type="button" onclick="copyAiHandoff('weekly-training-card-prompt')">複製給 AI</button>
+              </div>
+            </div>
+            <details class="ai-handoff-preview">
+              <summary>先看週圖卡 prompt</summary>
+              <textarea id="weekly-training-card-prompt" readonly>{html.escape(weekly_card_prompt)}</textarea>
+            </details>
+          </div>
+          <p class="note">如果你想快速做一張本週訓練圖卡，直接用這段就可以，不需要先跑完整 AI handoff。</p>
+        </div>
       </section>
       {capture_panel}
     """
 
 
-def monthly_ai_handoff_text(monthly, intelligence, progress_row, distribution_rows, key_session_rows, related_week_rows, coach_memory=None, knowledge_summary=None, include_raw_data=False, saved_reply=None):
+def monthly_ai_handoff_text(monthly, intelligence, progress_row, distribution_rows, key_session_rows, workout_structure_summary_rows, related_week_rows, coach_memory=None, knowledge_summary=None, include_raw_data=False, saved_reply=None):
     if not monthly or not intelligence:
         return ""
 
@@ -6748,6 +7481,18 @@ def monthly_ai_handoff_text(monthly, intelligence, progress_row, distribution_ro
             *key_session_lines,
         ])
 
+    if workout_structure_summary_rows:
+        pattern_insights = workout_structure_pattern_insights(workout_structure_summary_rows, "本月")
+        prompt_lines.extend([
+            "",
+            "## Workout Structure Patterns",
+        ])
+        prompt_lines.extend(f"- {line}" for line in pattern_insights)
+        for row in workout_structure_summary_rows:
+            prompt_lines.append(
+                f"- {row['date']} {row['activity']}（{row['workout']}）：{row['summary']}"
+            )
+
     if include_raw_data and distribution_rows:
         prompt_lines.extend([
             "",
@@ -6786,18 +7531,31 @@ def monthly_ai_handoff_text(monthly, intelligence, progress_row, distribution_ro
     return "\n".join(prompt_lines)
 
 
-def monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_rows, key_session_rows, related_week_rows, coach_memory=None, knowledge_summary=None, saved_reply=None):
+def monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_rows, key_session_rows, workout_structure_summary_rows, related_week_rows, coach_memory=None, knowledge_summary=None, saved_reply=None):
     handoff_text = monthly_ai_handoff_text(
         monthly,
         intelligence,
         progress_row,
         distribution_rows,
         key_session_rows,
+        workout_structure_summary_rows,
         related_week_rows,
         coach_memory,
         knowledge_summary,
         include_raw_data=True,
         saved_reply=saved_reply,
+    )
+    monthly_card_prompt = monthly_training_card_prompt(
+        monthly,
+        intelligence,
+        progress_row,
+        distribution_rows,
+        key_session_rows,
+        workout_structure_summary_rows,
+        related_week_rows,
+        coach_memory,
+        knowledge_summary,
+        saved_reply,
     )
     if not handoff_text:
         return ""
@@ -6830,6 +7588,27 @@ def monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_r
             </details>
           </div>
           <p class="note" id="monthly-ai-handoff-status">先看完這個月，再複製交給你習慣的 AI 繼續分析。</p>
+        </div>
+        <div class="review-card ai-handoff-card">
+          <span>Monthly Training Card Prompt</span>
+          <strong>把這個月分析交給圖像 AI 做成月訓練圖卡</strong>
+          <p>這個 prompt 會把月度位置、代表型態、關鍵週與關鍵課整理成適合 16:9 圖卡的文案。</p>
+          <div class="ai-handoff-block">
+            <div class="ai-handoff-block-head">
+              <div>
+                <strong>月圖卡 prompt</strong>
+                <p class="note">會保留月度判讀的重點，但避免把整份月 handoff 原封不動丟給圖像 AI。</p>
+              </div>
+              <div class="ai-handoff-actions">
+                <button class="secondary-action" type="button" onclick="copyAiHandoff('monthly-training-card-prompt')">複製給 AI</button>
+              </div>
+            </div>
+            <details class="ai-handoff-preview">
+              <summary>先看月圖卡 prompt</summary>
+              <textarea id="monthly-training-card-prompt" readonly>{html.escape(monthly_card_prompt)}</textarea>
+            </details>
+          </div>
+          <p class="note">如果你想快速做一張本月訓練圖卡，直接用這段就可以，不需要先跑完整 AI handoff。</p>
         </div>
       </section>
       {capture_panel}
@@ -6892,44 +7671,46 @@ def monthly_key_sessions_table(rows):
     """
 
 
-def activity_key_segments(split_rows):
-    analysis_rows = activity_analysis_splits(split_rows)
+def activity_key_segments(activity, split_rows, workout_split_rows=None):
+    all_rows = activity_analysis_splits(split_rows)
+    analysis_rows = activity_focus_splits(activity, split_rows, workout_split_rows) or all_rows
     if not analysis_rows:
         return []
+    labels = activity_focus_segment_labels(activity, analysis_rows, all_rows, workout_split_rows)
     rows = []
     first = analysis_rows[0]
     last = analysis_rows[-1]
     rows.append({
         "anchor": "fragment-start",
-        "label": "起跑節奏",
-        "section": activity_split_label(first),
+        "label": labels["start"],
+        "section": structured_segment_label_for_split(first, split_rows, workout_split_rows or []),
         "metric": f"配速 {format_pace_seconds(first['elapsed_pace_sec_per_km']) or '—'} · HR {'' if first['avg_hr'] is None else int(round(first['avg_hr']))}",
-        "note": "先看這堂課一開始是怎麼進入今天的節奏。",
+        "note": "先看這堂課是怎麼進入今天真正要訓練的主體。",
         "split_anchor": f"split-{first['split_index']}",
     })
     if len(analysis_rows) >= 3:
         middle = analysis_rows[len(analysis_rows) // 2]
         rows.append({
             "anchor": "fragment-middle",
-            "label": "中段反應",
-            "section": activity_split_label(middle),
+            "label": labels["middle"],
+            "section": structured_segment_label_for_split(middle, split_rows, workout_split_rows or []),
             "metric": f"配速 {format_pace_seconds(middle['elapsed_pace_sec_per_km']) or '—'} · HR {'' if middle['avg_hr'] is None else int(round(middle['avg_hr']))}",
-            "note": "中段通常最能看出刺激有沒有真正成立。",
+            "note": "中段通常最能看出今天真正的刺激有沒有成立。",
             "split_anchor": f"split-{middle['split_index']}",
         })
     rows.append({
         "anchor": "fragment-finish",
-        "label": "收尾狀態",
-        "section": activity_split_label(last),
+        "label": labels["finish"],
+        "section": structured_segment_label_for_split(last, split_rows, workout_split_rows or []),
         "metric": f"配速 {format_pace_seconds(last['elapsed_pace_sec_per_km']) or '—'} · HR {'' if last['avg_hr'] is None else int(round(last['avg_hr']))}",
-        "note": "最後一段最能看出今天留下來的是節奏、耐力，還是單純把課表做完。",
+        "note": "這一段最能看出今天主體刺激最後有沒有被守住。",
         "split_anchor": f"split-{last['split_index']}",
     })
     return rows
 
 
-def activity_fragment_table(activity, split_rows):
-    rows = activity_key_segments(split_rows)
+def activity_fragment_table(activity, split_rows, workout_split_rows=None):
+    rows = activity_key_segments(activity, split_rows, workout_split_rows)
     if not rows:
         return '<p class="note">目前還沒有足夠的 split 可以建立關鍵片段。</p>'
 
@@ -7022,10 +7803,11 @@ def raw_data_column(groups):
     return f'<div class="raw-data-column">{group_html}</div>'
 
 
-def activity_facts_panel(activity, split_rows=None):
+def activity_facts_panel(activity, split_rows=None, workout_split_rows=None):
     if not activity:
         return ""
     split_rows = split_rows or []
+    workout_split_rows = workout_split_rows or []
     def activity_value(key, fallback=None):
         try:
             value = activity[key]
@@ -7189,7 +7971,9 @@ def activity_facts_panel(activity, split_rows=None):
 
     split_tab = f"""
       <div class="raw-data-tab-panel" data-raw-panel="split" hidden>
-        <p class="note raw-data-split-note">每公里 split 直接放在這裡，先看課的結構，再往下看教練怎麼理解。</p>
+        <p class="note raw-data-split-note">先看課表片段，再往下看每公里 raw split，會比只看公里數更接近這堂課原本的設計。</p>
+        {activity_workout_structure_table(workout_split_rows)}
+        <p class="note raw-data-split-note">下面這張是每公里 raw split，所以 2K 主段會拆成兩列 1K，0.5K 恢復也會保留成半公里。</p>
         {activity_split_table(split_rows)}
       </div>
     """
@@ -7662,10 +8446,11 @@ def activity_split_table(split_rows):
     body = []
     for row in split_rows:
         cadence = "" if row["avg_cadence_spm"] is None else format_number(row["avg_cadence_spm"], 1)
-        label = activity_split_label(row)
+        label = activity_split_label(row, split_rows)
+        kind = split_segment_kind(row)
         distance_text = (
             f"{format_number((row['split_distance_m'] or 0) / 1000, 2)} km"
-            if not is_residual_split(row)
+            if kind == "main"
             else f"{format_number(row['split_distance_m'], 0)} m"
         )
         body.append(
@@ -7699,7 +8484,211 @@ def activity_split_table(split_rows):
     """
 
 
-def activity_ai_handoff_text(activity, review, split_rows, weekly_review=None, monthly_overview=None, include_raw_data=False, saved_reply=None):
+def workout_split_label(row):
+    split_type = str(row["split_type"] or "").strip().lower()
+    if split_type == "interval_warmup":
+        return "Warm-up"
+    if split_type == "interval_active":
+        return "主段"
+    if split_type == "interval_recovery":
+        return "恢復"
+    if split_type == "interval_cooldown":
+        return "Cool-down"
+    if split_type == "rwd_run":
+        return "整體跑步"
+    if split_type == "rwd_walk":
+        return "步行 / 起始"
+    return row["split_type"] or f"片段 {row['split_index']}"
+
+
+def display_workout_splits(workout_split_rows):
+    rows = []
+    for row in workout_split_rows or []:
+        split_type = str(row["split_type"] or "").strip().lower()
+        if split_type in {"rwd_run", "rwd_walk", ""}:
+            continue
+        rows.append(row)
+    return rows
+
+
+def workout_segment_kind(row):
+    split_type = str(row["split_type"] or "").strip().lower()
+    if split_type == "interval_warmup":
+        return "warmup"
+    if split_type == "interval_active":
+        return "active"
+    if split_type == "interval_recovery":
+        return "recovery"
+    if split_type == "interval_cooldown":
+        return "cooldown"
+    if split_type == "rwd_run":
+        return "overall_run"
+    if split_type == "rwd_walk":
+        return "walk"
+    return "other"
+
+
+def split_rows_with_bounds(split_rows):
+    total = 0.0
+    rows = []
+    for row in split_rows or []:
+        distance = float(row["split_distance_m"] or 0)
+        start = total
+        end = total + max(distance, 0.0)
+        rows.append((row, start, end))
+        total = end
+    return rows
+
+
+def workout_split_rows_with_bounds(workout_split_rows):
+    total = 0.0
+    rows = []
+    for row in display_workout_splits(workout_split_rows):
+        distance = float(row["total_distance_m"] or 0)
+        start = total
+        end = total + max(distance, 0.0)
+        rows.append((row, start, end))
+        total = end
+    return rows
+
+
+def structured_focus_workout_segments(workout_split_rows):
+    bounded = workout_split_rows_with_bounds(workout_split_rows)
+    active = [item for item in bounded if workout_segment_kind(item[0]) == "active"]
+    if active:
+        substantial_active = []
+        for item in active:
+            row = item[0]
+            distance_m = float(row["total_distance_m"] or 0)
+            duration_sec = float(row["total_timer_time_sec"] or 0)
+            # Treat substantial workout blocks as the real session structure,
+            # while excluding very short stride-like active snippets.
+            if distance_m >= 300 or duration_sec >= 60:
+                substantial_active.append(item)
+        if substantial_active:
+            return substantial_active
+        return active
+    mainish = [item for item in bounded if workout_segment_kind(item[0]) in {"warmup", "active", "cooldown"}]
+    return mainish or bounded
+
+
+def structured_active_segment_rows(workout_split_rows):
+    return [item[0] for item in structured_focus_workout_segments(workout_split_rows) if workout_segment_kind(item[0]) == "active"]
+
+
+def workout_segment_overlap(split_start, split_end, segment_start, segment_end):
+    return max(0.0, min(split_end, segment_end) - max(split_start, segment_start))
+
+
+def structured_focus_splits(split_rows, workout_split_rows):
+    if not split_rows or not workout_split_rows:
+        return []
+    focus_segments = structured_focus_workout_segments(workout_split_rows)
+    if not focus_segments:
+        return []
+    raw_rows = split_rows_with_bounds(split_rows)
+    selected = []
+    seen = set()
+    for segment, segment_start, segment_end in focus_segments:
+        for row, row_start, row_end in raw_rows:
+            overlap = workout_segment_overlap(row_start, row_end, segment_start, segment_end)
+            if overlap <= 0:
+                continue
+            key = row["split_index"]
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(row)
+    selected_main = activity_analysis_splits(selected)
+    if selected_main:
+        selected = selected_main
+    if len(focus_segments) == 1 and len(selected) >= 6:
+        return selected[1:-1]
+    return selected
+
+
+def structured_segment_for_split(row, split_rows, workout_split_rows):
+    if not row or not split_rows or not workout_split_rows:
+        return None
+    raw_bounds = {item[0]["split_index"]: item for item in split_rows_with_bounds(split_rows)}
+    current = raw_bounds.get(row["split_index"])
+    if not current:
+        return None
+    _raw_row, row_start, row_end = current
+    best = None
+    best_overlap = 0.0
+    for segment, segment_start, segment_end in workout_split_rows_with_bounds(workout_split_rows):
+        overlap = workout_segment_overlap(row_start, row_end, segment_start, segment_end)
+        if overlap > best_overlap:
+            best = segment
+            best_overlap = overlap
+    return best
+
+
+def structured_segment_label_for_split(row, split_rows, workout_split_rows):
+    segment = structured_segment_for_split(row, split_rows, workout_split_rows)
+    if not segment:
+        return activity_split_label(row, split_rows)
+    segment_label = workout_split_label(segment)
+    raw_label = activity_split_label(row, split_rows)
+    if raw_label.startswith("片段 ") or raw_label.startswith("KM "):
+        return f"{segment_label} · {raw_label}"
+    return raw_label
+
+
+def activity_workout_structure_table(workout_split_rows):
+    rows = display_workout_splits(workout_split_rows)
+    if not rows:
+        return '<p class="note">這堂課目前沒有可讀的課表片段，先看下面的 raw split。</p>'
+    body = []
+    for index, row in enumerate(rows, start=1):
+        distance_text = (
+            f"{format_number((row['total_distance_m'] or 0) / 1000, 2)} km"
+            if (row["total_distance_m"] or 0) >= 1000
+            else f"{format_number(row['total_distance_m'], 0)} m"
+        )
+        pace_text = format_pace_seconds(
+            None if row["avg_speed_mps"] in (None, 0) else int(round(1000.0 / float(row["avg_speed_mps"])))
+        )
+        body.append(
+            f"""
+            <tr>
+              <td>{index}</td>
+              <td>{html.escape(str(workout_split_label(row)))}</td>
+              <td>{html.escape(distance_text)}</td>
+              <td>{html.escape(format_duration_hms(row["total_timer_time_sec"]))}</td>
+              <td>{html.escape(pace_text)}</td>
+            </tr>
+            """
+        )
+    return f"""
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>課表片段</th>
+              <th>距離</th>
+              <th>時間</th>
+              <th>片段配速</th>
+            </tr>
+          </thead>
+          <tbody>{"".join(body)}</tbody>
+        </table>
+      </div>
+    """
+
+
+def activity_ai_handoff_text(
+    activity,
+    review,
+    split_rows,
+    workout_split_rows=None,
+    weekly_review=None,
+    monthly_overview=None,
+    include_raw_data=False,
+    saved_reply=None,
+):
     if not activity or not review:
         return ""
 
@@ -7739,7 +8728,7 @@ def activity_ai_handoff_text(activity, review, split_rows, weekly_review=None, m
         cause_lines.append(f"- {card['title']}：{card['value']}；{card['note']}")
 
     segment_lines = []
-    for row in activity_key_segments(split_rows):
+    for row in activity_key_segments(activity, split_rows, workout_split_rows or []):
         segment_lines.append(
             f"- {row['label']}（{row['section']}）：{row['metric']}；{row['note']}"
         )
@@ -7803,6 +8792,10 @@ def activity_ai_handoff_text(activity, review, split_rows, weekly_review=None, m
         f"- Focus：{review['focus']}",
         f"- Why：{review['why']}",
         f"- Next：{review['looking_forward']}",
+    ])
+    if review.get("structure_note"):
+        prompt_lines.append(f"- Structure Note：{review['structure_note']}")
+    prompt_lines.extend([
         "",
         "## Reasoning",
         *cause_lines,
@@ -7864,7 +8857,7 @@ def activity_ai_handoff_text(activity, review, split_rows, weekly_review=None, m
         for row in split_rows:
             prompt_lines.append(
                 "| {label} | {distance} | {elapsed} | {pace} | {hr} | {max_hr} | {power} | {cadence} | {stride} | {gct} | {vratio} | {vosc} | {gain} | {loss} | {stamina_start} | {stamina_end} |".format(
-                    label=activity_split_label(row),
+                    label=activity_split_label(row, split_rows),
                     distance=(
                         f"{format_number((row['split_distance_m'] or 0) / 1000, 3)} km"
                         if not is_residual_split(row)
@@ -7904,17 +8897,26 @@ def activity_ai_handoff_text(activity, review, split_rows, weekly_review=None, m
     return "\n".join(prompt_lines)
 
 
-def activity_ai_handoff_panel(activity, review, split_rows, weekly_review=None, monthly_overview=None, saved_reply=None):
+def activity_ai_handoff_panel(activity, review, split_rows, workout_split_rows=None, weekly_review=None, monthly_overview=None, saved_reply=None):
     handoff_text = activity_ai_handoff_text(
         activity,
         review,
         split_rows,
+        workout_split_rows,
         weekly_review,
         monthly_overview,
         include_raw_data=True,
         saved_reply=saved_reply,
     )
-    daily_card_prompt = activity_daily_training_card_prompt(activity, review, weekly_review, monthly_overview)
+    daily_card_prompt = activity_daily_training_card_prompt(
+        activity,
+        review,
+        split_rows,
+        workout_split_rows,
+        weekly_review,
+        monthly_overview,
+        saved_reply,
+    )
     if not handoff_text:
         return ""
 
@@ -7952,12 +8954,12 @@ def activity_ai_handoff_panel(activity, review, split_rows, weekly_review=None, 
         <div class="review-card ai-handoff-card">
           <span>Daily Training Card Prompt</span>
           <strong>把這堂課交給圖像 AI 做成每日訓練圖卡</strong>
-          <p>這個 prompt 會把今日摘要、課表完成度與教練建議整理成 16:9 的專業圖卡內容。</p>
+          <p>這個 prompt 會直接帶入今日摘要、課表結構、平台判讀與關鍵片段；即使還沒先跑 AI 延伸分析，也能直接拿去做圖卡。</p>
           <div class="ai-handoff-block">
             <div class="ai-handoff-block-head">
               <div>
                 <strong>圖卡 prompt</strong>
-                <p class="note">可直接交給圖像 AI 生成每日訓練圖卡。</p>
+                <p class="note">平台自己的判讀已經會先放進去；若你之前存過 AI 回覆，也只會當補充脈絡。</p>
               </div>
               <div class="ai-handoff-actions">
                 <button class="secondary-action" type="button" onclick="copyAiHandoff('activity-daily-card-prompt')">複製給 AI</button>
@@ -7968,7 +8970,7 @@ def activity_ai_handoff_panel(activity, review, split_rows, weekly_review=None, 
               <textarea id="activity-daily-card-prompt" readonly>{escaped_daily_card_prompt}</textarea>
             </details>
           </div>
-          <p class="note">如果你只想做一張每日訓練圖卡，直接複製這段就能用。</p>
+          <p class="note">如果你只想做一張每日訓練圖卡，直接複製這段就能用；不需要先經過完整 AI handoff。</p>
         </div>
       </section>
       {capture_panel}
@@ -7978,6 +8980,7 @@ def activity_ai_handoff_panel(activity, review, split_rows, weekly_review=None, 
 def activity_review_panel(
     activity,
     split_rows,
+    workout_split_rows,
     activity_rows,
     selected_activity_id,
     shoe_rows,
@@ -7996,7 +8999,7 @@ def activity_review_panel(
         </section>
         """
 
-    review = activity_review_payload(activity, split_rows)
+    review = activity_review_payload(activity, split_rows, workout_split_rows)
     workout_name = str(activity["workout_type_name_en"] or activity["activity_type"] or "活動")
     start_time = str(activity["activity_start_time"]).replace("T", " ")[:16]
     side_cards = []
@@ -8025,7 +9028,7 @@ def activity_review_panel(
 
     return f"""
       {activity_selector_bar(activity_rows, selected_activity_id)}
-      {activity_facts_panel(activity, split_rows)}
+      {activity_facts_panel(activity, split_rows, workout_split_rows)}
       <section class="panel-section" id="activity-summary">
         <h2>Activity Summary</h2>
         <div class="review-card knowledge-conversation-card activity-compact-card activity-summary-card">
@@ -8044,6 +9047,8 @@ def activity_review_panel(
           <span>先回答一件事</span>
           <strong>{html.escape(review["learning_question"])}</strong>
           <p>{html.escape(review["learning"])}</p>
+          {'<p class="note">這次判讀先讀課表片段，再回頭核對 raw split，所以主段、恢復與收操會分開理解。</p>' if review.get("reads_workout_structure") else ''}
+          {f'<p class="note">{html.escape(review["structure_note"])}</p>' if review.get("structure_note") else ''}
           <div class="reasoning-jump-row">
             {"".join(f'<a class="inline-jump-link" href="{html.escape(href, quote=True)}">{html.escape(label)}</a>' for label, href in review["reasoning_steps"])}
           </div>
@@ -8067,9 +9072,9 @@ def activity_review_panel(
         </div>
         <h3 class="subsection-title">教練看了哪些關鍵片段</h3>
         <p class="note">先看教練停在哪幾段，再一路往下核對那一段的實際 split。</p>
-        {activity_fragment_table(activity, split_rows)}
+        {activity_fragment_table(activity, split_rows, workout_split_rows)}
       </section>
-      {activity_ai_handoff_panel(activity, review, split_rows, weekly_review, monthly_overview, saved_reply)}
+      {activity_ai_handoff_panel(activity, review, split_rows, workout_split_rows, weekly_review, monthly_overview, saved_reply)}
     """
 
 
@@ -8301,7 +9306,7 @@ def journey_page_panel(story, timeline_rows, turning_point_rows, available_month
     """
 
 
-def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality_row, history_rows, distribution_rows, key_session_rows, related_week_rows, available_month_rows, selected_month, knowledge_summary=None, coach_memory=None, saved_reply=None):
+def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality_row, history_rows, distribution_rows, key_session_rows, workout_structure_summary_rows, related_week_rows, available_month_rows, selected_month, knowledge_summary=None, coach_memory=None, saved_reply=None):
     if not monthly or not intelligence:
         return """
         <section class="panel-section">
@@ -8456,7 +9461,7 @@ def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality
         <h2>教練看了哪些關鍵課</h2>
         {monthly_key_sessions_table(key_session_rows)}
       </section>
-      {monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_rows, key_session_rows, related_week_rows, coach_memory, knowledge_summary, saved_reply)}
+      {monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_rows, key_session_rows, workout_structure_summary_rows, related_week_rows, coach_memory, knowledge_summary, saved_reply)}
     """
 
 
@@ -8466,6 +9471,7 @@ def weekly_review_panel(
     history_rows,
     distribution_rows,
     key_session_rows,
+    workout_structure_summary_rows,
     selected_week="0",
     history_rows_with_labels=None,
     knowledge_summary=None,
@@ -8566,7 +9572,7 @@ def weekly_review_panel(
         <h2>最近 5 週節奏</h2>
         {weekly_history_table(history_rows, selected_week)}
       </section>
-      {weekly_ai_handoff_panel(weekly, intelligence, review, distribution_rows, key_session_rows, history_rows, history_rows_with_labels, monthly_overview, overview_attention, knowledge_summary, saved_reply)}
+      {weekly_ai_handoff_panel(weekly, intelligence, review, distribution_rows, key_session_rows, workout_structure_summary_rows, history_rows, history_rows_with_labels, monthly_overview, overview_attention, knowledge_summary, saved_reply)}
     """
 
 
@@ -12576,6 +13582,27 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
       });
     }
 
+    function openRawDataPanelForTarget(target) {
+      if (!target) return;
+      const detailPanel = target.closest(".raw-data-details-panel");
+      if (!detailPanel) return;
+      if (detailPanel.hasAttribute("hidden")) {
+        detailPanel.removeAttribute("hidden");
+      }
+      const rawCard = detailPanel.closest(".raw-data-card");
+      const toggle = rawCard ? rawCard.querySelector("button.raw-data-toggle") : null;
+      if (toggle) {
+        toggle.textContent = toggle.getAttribute("data-open-label") || "隱藏細節";
+      }
+      const tabPanel = target.closest(".raw-data-tab-panel");
+      if (tabPanel) {
+        const activeTab = tabPanel.getAttribute("data-raw-panel");
+        if (activeTab) {
+          setRawDataTab(detailPanel, activeTab);
+        }
+      }
+    }
+
     document.addEventListener("click", function (event) {
       const tab = event.target.closest("button.raw-data-tab");
       if (!tab || event.defaultPrevented) return;
@@ -12584,6 +13611,19 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
       const activeTab = tab.getAttribute("data-raw-tab");
       if (!activeTab) return;
       setRawDataTab(panel, activeTab);
+    });
+
+    document.addEventListener("click", function (event) {
+      const link = event.target.closest("a.inline-jump-link");
+      if (!link || event.defaultPrevented) return;
+      const href = link.getAttribute("href") || "";
+      if (!href.startsWith("#")) return;
+      const target = document.getElementById(href.slice(1));
+      if (!target) return;
+      openRawDataPanelForTarget(target);
+      window.setTimeout(function () {
+        target.scrollIntoView({ block: "start", behavior: "smooth" });
+      }, 20);
     });
 
     window.history.scrollRestoration = "manual";
@@ -12625,6 +13665,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     activity_purpose_rows = []
     distribution_rows = []
     weekly_key_session_rows = []
+    weekly_workout_structure_summary_rows = []
     month_rows = []
     monthly = None
     selected_month = ""
@@ -12634,6 +13675,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     monthly_distribution_rows = []
     monthly_progress_row = None
     monthly_key_session_rows = []
+    monthly_workout_structure_summary_rows = []
     monthly_related_week_rows = []
     monthly_assignment_quality_row = None
     journey_selected_story = None
@@ -12670,6 +13712,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     latest_activity = None
     selected = None
     split_rows = []
+    workout_split_rows = []
     today = None
     overview_attention = None
 
@@ -12690,11 +13733,13 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
             weekly_rows_with_labels = weekly_history_with_labels(connection, weekly_rows)
             distribution_rows = selected_week_distribution(connection, selected_week or None, limit=6)
             weekly_key_session_rows = selected_week_key_sessions(connection, selected_week or None)
+            weekly_workout_structure_summary_rows = key_session_workout_structure_summary(connection, weekly_key_session_rows)
 
         elif page == "activity":
             activity_rows = available_activities(connection)
             selected = selected_activity(connection, int(activity_id) if str(activity_id).isdigit() else None)
             split_rows = splits(connection, selected["activity_id"] if selected else None)
+            workout_split_rows = workout_structure_splits(connection, selected["activity_id"] if selected else None)
             _dropdown_options, activity_shoe_rows, activity_workout_rows, activity_purpose_rows, _activity_workout_purpose_rows = metadata_choice_sets(connection)
             weekly = week_summary(connection)
             intelligence = weekly_intelligence(connection)
@@ -12708,6 +13753,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
             selected_month = str(journey_selected_story["month_key"]) if journey_selected_story else (str(month_rows[0]["month_key"]) if month_rows else "")
             monthly_memory = monthly_coach_memory(connection, selected_month or None)
             monthly_key_session_rows = selected_month_key_sessions(connection, selected_month or None)
+            monthly_workout_structure_summary_rows = key_session_workout_structure_summary(connection, monthly_key_session_rows)
             journey_timeline_rows = journey_timeline(connection)
             journey_turning_rows = journey_turning_points(connection, selected_month or None, limit=6)
 
@@ -12718,9 +13764,10 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
             monthly_review = selected_month_intelligence(connection, selected_month or None)
             monthly_memory = monthly_coach_memory(connection, selected_month or None)
             monthly_rows = monthly_history(connection)
-            monthly_distribution_rows = selected_month_distribution(connection, selected_month or None, limit=8)
+            monthly_distribution_rows = selected_month_distribution(connection, selected_month or None)
             monthly_progress_row = selected_month_progress(connection, selected_month or None)
             monthly_key_session_rows = selected_month_key_sessions(connection, selected_month or None)
+            monthly_workout_structure_summary_rows = key_session_workout_structure_summary(connection, monthly_key_session_rows)
             monthly_related_week_rows = selected_month_related_weeks(connection, selected_month or None, limit=5)
             monthly_assignment_quality_row = selected_month_assignment_quality(connection, selected_month or None)
 
@@ -12824,7 +13871,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     if page == "weekly":
         return f"""{html_start}
     {weekly_selector_bar(week_rows, selected_week, "weekly")}
-    {weekly_review_panel(weekly, intelligence, weekly_rows, distribution_rows, weekly_key_session_rows, selected_week, weekly_rows_with_labels, weekly_knowledge_summary, monthly_overview, overview_attention, weekly_ai_reply)}
+    {weekly_review_panel(weekly, intelligence, weekly_rows, distribution_rows, weekly_key_session_rows, weekly_workout_structure_summary_rows, selected_week, weekly_rows_with_labels, weekly_knowledge_summary, monthly_overview, overview_attention, weekly_ai_reply)}
     {archive_metric_strip(summary)}
   </main>
 </body>
@@ -12832,7 +13879,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
 
     if page == "activity":
         return f"""{html_start}
-    {activity_review_panel(selected, split_rows, activity_rows, selected["activity_id"] if selected else "", activity_shoe_rows, activity_workout_rows, activity_purpose_rows, coach_step, weekly_review, monthly_overview, activity_ai_reply)}
+    {activity_review_panel(selected, split_rows, workout_split_rows, activity_rows, selected["activity_id"] if selected else "", activity_shoe_rows, activity_workout_rows, activity_purpose_rows, coach_step, weekly_review, monthly_overview, activity_ai_reply)}
     {archive_metric_strip(summary)}
   </main>
 </body>
@@ -12848,7 +13895,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
 
     if page == "monthly":
         return f"""{html_start}
-    {monthly_review_panel(monthly, monthly_review, monthly_progress_row, monthly_assignment_quality_row, monthly_rows, monthly_distribution_rows, monthly_key_session_rows, monthly_related_week_rows, month_rows, selected_month, monthly_knowledge_summary, monthly_memory, monthly_ai_reply)}
+    {monthly_review_panel(monthly, monthly_review, monthly_progress_row, monthly_assignment_quality_row, monthly_rows, monthly_distribution_rows, monthly_key_session_rows, monthly_workout_structure_summary_rows, monthly_related_week_rows, month_rows, selected_month, monthly_knowledge_summary, monthly_memory, monthly_ai_reply)}
   </main>
 </body>
 </html>"""
