@@ -33,6 +33,11 @@ try:
 except ModuleNotFoundError:
     from analysis_platform.attention_selection_shadow import evaluate_candidates, live_signals, rank_candidates
 
+try:
+    from wsi_engine import ensure_activity_wsi_table, get_activity_wsi, recompute_activity_wsi
+except ModuleNotFoundError:
+    from analysis_platform.wsi_engine import ensure_activity_wsi_table, get_activity_wsi, recompute_activity_wsi
+
 
 ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = ROOT.parent
@@ -1350,6 +1355,7 @@ def connect():
     ensure_workout_purpose_map(connection)
     ensure_coach_knowledge_shoe_memory(connection)
     ensure_activity_metadata_provenance(connection)
+    ensure_activity_wsi_table(connection)
     connection.commit()
     return connection
 
@@ -6928,6 +6934,7 @@ def weekly_ai_handoff_text(
     monthly_overview=None,
     overview_attention=None,
     knowledge_summary=None,
+    wsi_summary=None,
     include_raw_data=False,
     saved_reply=None,
 ):
@@ -7090,6 +7097,14 @@ def weekly_ai_handoff_text(
             f"- 說明：{knowledge_summary['detail']}",
         ])
 
+    wsi_lines = wsi_period_prompt_lines(wsi_summary)
+    if wsi_lines:
+        prompt_lines.extend([
+            "",
+            "## 訓練序列理解",
+            *wsi_lines,
+        ])
+
     if key_session_lines:
         prompt_lines.extend([
             "",
@@ -7189,6 +7204,7 @@ def weekly_ai_handoff_panel(
     monthly_overview=None,
     overview_attention=None,
     knowledge_summary=None,
+    wsi_summary=None,
     saved_reply=None,
 ):
     handoff_text = weekly_ai_handoff_text(
@@ -7203,6 +7219,7 @@ def weekly_ai_handoff_panel(
         monthly_overview,
         overview_attention,
         knowledge_summary,
+        wsi_summary,
         include_raw_data=True,
         saved_reply=saved_reply,
     )
@@ -7275,7 +7292,7 @@ def weekly_ai_handoff_panel(
     """
 
 
-def monthly_ai_handoff_text(monthly, intelligence, progress_row, distribution_rows, key_session_rows, workout_structure_summary_rows, related_week_rows, coach_memory=None, knowledge_summary=None, include_raw_data=False, saved_reply=None):
+def monthly_ai_handoff_text(monthly, intelligence, progress_row, distribution_rows, key_session_rows, workout_structure_summary_rows, related_week_rows, coach_memory=None, knowledge_summary=None, wsi_summary=None, include_raw_data=False, saved_reply=None):
     if not monthly or not intelligence:
         return ""
 
@@ -7444,6 +7461,14 @@ def monthly_ai_handoff_text(monthly, intelligence, progress_row, distribution_ro
             f"- 已確認知識：{knowledge_summary['detail']}",
         ])
 
+    wsi_lines = wsi_period_prompt_lines(wsi_summary)
+    if wsi_lines:
+        prompt_lines.extend([
+            "",
+            "## 訓練序列理解",
+            *wsi_lines,
+        ])
+
     reasoning_lines = []
     if intelligence["is_partial_month"]:
         completion = format_number(progress_pct, 0) if progress_pct is not None else "—"
@@ -7547,7 +7572,7 @@ def monthly_ai_handoff_text(monthly, intelligence, progress_row, distribution_ro
     return "\n".join(prompt_lines)
 
 
-def monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_rows, key_session_rows, workout_structure_summary_rows, related_week_rows, coach_memory=None, knowledge_summary=None, saved_reply=None):
+def monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_rows, key_session_rows, workout_structure_summary_rows, related_week_rows, coach_memory=None, knowledge_summary=None, wsi_summary=None, saved_reply=None):
     handoff_text = monthly_ai_handoff_text(
         monthly,
         intelligence,
@@ -7558,6 +7583,7 @@ def monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_r
         related_week_rows,
         coach_memory,
         knowledge_summary,
+        wsi_summary,
         include_raw_data=True,
         saved_reply=saved_reply,
     )
@@ -8724,6 +8750,7 @@ def activity_ai_handoff_text(
     workout_split_rows=None,
     weekly_review=None,
     monthly_overview=None,
+    wsi=None,
     include_raw_data=False,
     saved_reply=None,
 ):
@@ -8822,7 +8849,17 @@ def activity_ai_handoff_text(
     if secondary_purpose_text:
         prompt_lines.append(f"- 次要目的：{secondary_purpose_text}")
 
+    wsi_text = localized_wsi_values(wsi)
     prompt_lines.extend([
+        "",
+        "## 訓練序列理解",
+        f"- 主要角色：{wsi_text['mission'] if wsi_text else '目前沒有足夠資料'}",
+        f"- 教練讀法：{wsi_text['phrase'] if wsi_text else '目前沒有足夠資料'}",
+        f"- 任務完成度：{wsi_text['status'] if wsi_text else '目前沒有足夠資料'}",
+        f"- 序列狀態：{wsi_text['continuity'] if wsi_text else '目前沒有足夠資料'}",
+        f"- 資料信心：{'建議先補標註' if wsi_text and wsi_text['evidenceQuality'] == 'needs_annotation' else '可用' if wsi_text else '目前沒有足夠資料'}",
+        f"- 資料提醒：{wsi_text['evidenceNote'] if wsi_text and wsi_text['evidenceNote'] else '無'}",
+        f"- 判讀原因：{wsi_text['reasoning'] if wsi_text else '目前沒有足夠的前後文，暫不過度宣告。'}",
         "",
         "## 教練理解",
         f"- 問題：{review['learning_question']}",
@@ -8935,7 +8972,570 @@ def activity_ai_handoff_text(
     return "\n".join(prompt_lines)
 
 
-def activity_ai_handoff_panel(activity, review, split_rows, workout_split_rows=None, weekly_review=None, monthly_overview=None, saved_reply=None):
+WSI_MISSION_LABELS = {
+    "Build": ("建立能力", "這堂是主刺激，負責把能力往前推。"),
+    "Prepare": ("準備下一堂", "這堂不是主菜，而是在幫下一個訓練目標保留可用入口。"),
+    "Recover": ("吸收恢復", "這堂的重點是整理前面留下的負荷，讓身體重新變得可用。"),
+    "Activate": ("重新啟動", "這堂在把腿感、節奏或跑步狀態接回來。"),
+}
+
+WSI_STATUS_LABELS = {
+    "Completed": ("已完成", "今天的任務有完成。"),
+    "Partial": ("部分完成", "方向是對的，但執行成本讓完成度需要保守看。"),
+}
+
+WSI_CONTINUITY_LABELS = {
+    "Ready": ("已準備好", "這堂課把序列送進下一步可用狀態。"),
+    "Maintained": ("維持住", "序列沒有被打斷，但也先不過度宣告已準備好。"),
+    "Overloaded": ("負荷偏高", "這堂課可能讓後續銜接承受額外壓力。"),
+}
+
+WSI_EVIDENCE_LABELS = {
+    "usable": ("資料足夠", "目前資料足以支撐這次序列判讀。"),
+    "needs_annotation": ("建議補標註", "這筆活動需要更多課表或目的脈絡，判讀先保守看。"),
+}
+
+
+def wsi_label(mapping, value):
+    label, description = mapping.get(value, (value, ""))
+    return label, description
+
+
+def localized_wsi_values(wsi):
+    if not wsi:
+        return None
+    mission_label, _mission_description = wsi_label(WSI_MISSION_LABELS, wsi["missionCategory"])
+    status_label, _status_description = wsi_label(WSI_STATUS_LABELS, wsi["missionStatus"])
+    continuity_label, _continuity_description = wsi_label(WSI_CONTINUITY_LABELS, wsi["continuityState"])
+    return {
+        "mission": mission_label,
+        "status": status_label,
+        "continuity": continuity_label,
+        "phrase": wsi["missionPhrase"],
+        "reasoning": wsi["sequenceReasoning"],
+        "evidenceQuality": wsi.get("evidenceQuality", "usable"),
+        "evidenceNote": wsi.get("evidenceNote", ""),
+    }
+
+
+def wsi_context_workout(wsi, key):
+    context = wsi.get("context") if wsi else None
+    if not isinstance(context, dict):
+        return None
+    workout = context.get(key)
+    return workout if isinstance(workout, dict) else None
+
+
+def wsi_context_label(workout, short=False):
+    if not workout:
+        return ""
+    date_text = str(workout.get("activity_date") or workout.get("activity_start_time") or "")[:10]
+    label = (
+        workout.get("workout_type_name_zh")
+        or workout.get("workout_type_name_en")
+        or workout.get("activity_name")
+        or workout.get("activity_type")
+        or "活動"
+    )
+    distance = workout.get("distance_km")
+    distance_text = ""
+    try:
+        if distance not in (None, ""):
+            distance_text = f"{float(distance):g} km"
+    except (TypeError, ValueError):
+        distance_text = ""
+    if short:
+        return str(label)
+    details = []
+    if date_text:
+        details.append(date_text)
+    details.append(str(label))
+    if distance_text:
+        details.append(distance_text)
+    return " · ".join(details)
+
+
+def wsi_product_outcome(continuity_state):
+    if continuity_state == "Ready":
+        return "已準備好下一堂"
+    if continuity_state == "Overloaded":
+        return "後續銜接要保守"
+    return "序列維持住"
+
+
+def wsi_product_coach_explanation(wsi):
+    mission = wsi.get("missionCategory")
+    status = wsi.get("missionStatus")
+    continuity = wsi.get("continuityState")
+    previous = wsi_context_workout(wsi, "previousWorkout")
+    next_workout = wsi_context_workout(wsi, "nextWorkout")
+    previous_label = wsi_context_label(previous, short=True)
+    next_label = wsi_context_label(next_workout, short=True)
+
+    if mission == "Prepare":
+        if next_label:
+            lead = f"今天不是增加能力的一天，而是替{next_label}保留最佳入口。"
+        else:
+            lead = "今天的主要任務不是增加能力，而是在目前序列中保留下一步訓練的可用入口。"
+        if status == "Partial":
+            return f"{lead}方向是對的，但這堂執行成本偏高，所以先把完成度保守看，不直接宣告已完全準備好。"
+        if continuity == "Ready":
+            return f"{lead}這堂課有完成它的銜接任務，因此可以把序列推到下一步可用狀態。"
+        return f"{lead}序列沒有被打斷，但目前仍先保守判定為維持住。"
+    if mission == "Build":
+        lead = "今天是主刺激，重點是把能力往前推。"
+        if continuity == "Overloaded":
+            return f"{lead}但這堂也讓後續承受比較多壓力，下一步銜接要保守一點。"
+        return f"{lead}任務本身有完成，但建立能力不等於立刻準備好下一堂，所以序列狀態先看成維持住。"
+    if mission == "Recover":
+        if previous_label:
+            return f"今天的重點不是再堆更多刺激，而是整理{previous_label}後留下的負荷。這樣讀，比單純把它看成輕鬆跑，更能保住整段序列的恢復意義。"
+        return "今天的重點不是再堆更多刺激，而是讓身體重新變得可用。這樣讀，比單純把它看成輕鬆跑，更接近教練會看的序列意義。"
+    if mission == "Activate":
+        return "今天的重點是把腿感、節奏或跑步狀態重新接回來。它不一定是主刺激，也不一定是在準備特定一堂，而是在讓訓練節奏重新啟動。"
+    return wsi.get("missionPhrase") or wsi.get("sequenceReasoning") or "目前資料仍需要保守判讀。"
+
+
+def wsi_period_summary(connection, start_date, end_date, period_label):
+    if not start_date or not end_date:
+        return None
+    rows = connection.execute(
+        """
+        SELECT
+            r.activity_id,
+            r.activity_date,
+            r.distance_km,
+            COALESCE(r.workout_type_name_zh, r.activity_type, '活動') AS workout_label,
+            w.mission_category,
+            w.mission_status,
+            w.continuity_state,
+            w.evidence_quality
+        FROM activity_review_view r
+        LEFT JOIN activity_wsi w ON w.activity_id = r.activity_id
+        WHERE r.activity_date BETWEEN ? AND ?
+        ORDER BY r.activity_start_time
+        """,
+        (start_date, end_date),
+    ).fetchall()
+    if not rows:
+        return None
+
+    usable_rows = [row for row in rows if row["evidence_quality"] == "usable"]
+    mission_counts = Counter(
+        row["mission_category"]
+        for row in usable_rows
+        if row["mission_category"]
+    )
+    status_counts = Counter(
+        row["mission_status"]
+        for row in usable_rows
+        if row["mission_status"]
+    )
+    continuity_counts = Counter(
+        row["continuity_state"]
+        for row in usable_rows
+        if row["continuity_state"]
+    )
+    evidence_counts = Counter(
+        row["evidence_quality"] or "needs_annotation"
+        for row in rows
+    )
+    mission_examples = {}
+    for row in usable_rows:
+        mission = row["mission_category"]
+        if not mission:
+            continue
+        mission_examples.setdefault(mission, []).append({
+            "activityId": row["activity_id"],
+            "date": row["activity_date"],
+            "label": row["workout_label"],
+            "distanceKm": row["distance_km"],
+        })
+    missing_wsi = sum(1 for row in rows if not row["mission_category"])
+    dominant_mission = None
+    dominant_missions = []
+    if mission_counts:
+        mission_order = {"Build": 0, "Prepare": 1, "Recover": 2, "Activate": 3}
+        max_count = max(mission_counts.values())
+        dominant_missions = [
+            mission
+            for mission, count in sorted(
+                mission_counts.items(),
+                key=lambda item: (mission_order.get(item[0], 99), item[0]),
+            )
+            if count == max_count
+        ]
+        dominant_mission = dominant_missions[0]
+
+    usable_count = evidence_counts.get("usable", 0)
+    needs_annotation_count = evidence_counts.get("needs_annotation", 0) + missing_wsi
+
+    return {
+        "periodLabel": period_label,
+        "startDate": start_date,
+        "endDate": end_date,
+        "total": len(rows),
+        "missionCounts": dict(mission_counts),
+        "missionExamples": mission_examples,
+        "statusCounts": dict(status_counts),
+        "continuityCounts": dict(continuity_counts),
+        "usableCount": usable_count,
+        "needsAnnotationCount": needs_annotation_count,
+        "missingWsiCount": missing_wsi,
+        "dominantMission": dominant_mission,
+        "dominantMissions": dominant_missions,
+    }
+
+
+def wsi_period_interpretation(summary):
+    if not summary:
+        return ""
+    total = summary["total"]
+    if total == 0:
+        return "這段期間還沒有活動可以形成序列理解。"
+    if not summary["dominantMission"]:
+        return "這段期間已有活動，但還沒有足夠的序列理解結果。先重算 WSI 或補齊活動標註後，週/月判讀會更完整。"
+
+    mission_label, _mission_description = wsi_label(
+        WSI_MISSION_LABELS,
+        summary["dominantMission"],
+    )
+    mission_count = summary["missionCounts"].get(summary["dominantMission"], 0)
+    ready_count = summary["continuityCounts"].get("Ready", 0)
+    overloaded_count = summary["continuityCounts"].get("Overloaded", 0)
+    partial_count = summary["statusCounts"].get("Partial", 0)
+    needs_annotation_count = summary["needsAnnotationCount"]
+
+    if summary["dominantMission"] == "Build":
+        base = f"{summary['periodLabel']}有 {mission_count} 堂主要在建立能力，代表這段時間的主刺激比較明確。"
+    elif summary["dominantMission"] == "Prepare":
+        base = f"{summary['periodLabel']}有 {mission_count} 堂主要在銜接下一個訓練目標，重點是讓後面的課接得起來。"
+    elif summary["dominantMission"] == "Recover":
+        base = f"{summary['periodLabel']}有 {mission_count} 堂主要在吸收恢復，表示恢復義務在這段訓練裡很重要。"
+    elif summary["dominantMission"] == "Activate":
+        base = f"{summary['periodLabel']}有 {mission_count} 堂主要在重新啟動節奏，重點是把腿感與跑步狀態接回來。"
+    else:
+        base = f"{summary['periodLabel']}最多的是「{mission_label}」，共有 {mission_count} 堂。"
+
+    modifiers = []
+    if ready_count:
+        modifiers.append(f"{ready_count} 堂把序列推到可用狀態")
+    if partial_count:
+        modifiers.append(f"{partial_count} 堂完成度需要保守看")
+    if overloaded_count:
+        modifiers.append(f"{overloaded_count} 堂對後續銜接形成壓力")
+    if needs_annotation_count:
+        modifiers.append(f"{needs_annotation_count} 堂需要補標註或重算後再提高信心")
+
+    if modifiers:
+        return f"{base} 另外，{ '，'.join(modifiers) }。"
+    return base
+
+
+def monthly_wsi_learning(summary):
+    if not summary or summary.get("periodLabel") != "本月" or not summary.get("dominantMission"):
+        return None
+    total = max(1, int(summary.get("total") or 0))
+    mission_counts = summary.get("missionCounts", {})
+    prepare_count = int(mission_counts.get("Prepare", 0) or 0)
+    build_count = int(mission_counts.get("Build", 0) or 0)
+    recover_count = int(mission_counts.get("Recover", 0) or 0)
+    activate_count = int(mission_counts.get("Activate", 0) or 0)
+    ready_count = int(summary.get("continuityCounts", {}).get("Ready", 0) or 0)
+    partial_count = int(summary.get("statusCounts", {}).get("Partial", 0) or 0)
+    dominant = summary["dominantMission"]
+    dominant_missions = set(summary.get("dominantMissions") or [dominant])
+
+    if {"Build", "Recover"}.issubset(dominant_missions):
+        title = "建構與吸收並重的訓練月"
+        body = "這個月不是單純往前推，也不是單純恢復；主刺激與恢復義務同時很明顯，代表訓練一邊建立能力，一邊整理累積的負荷。"
+    elif {"Build", "Prepare"}.issubset(dominant_missions):
+        title = "建構與銜接並重的訓練月"
+        body = "這個月既有明確主刺激，也有足夠銜接課把後面的訓練接起來。重點不是單次突破，而是讓刺激能持續成立。"
+    elif dominant == "Prepare" and prepare_count / total >= 0.38:
+        title = "以銜接為主的建構月"
+        body = "這個月不是一直堆主刺激，而是反覆把身體送進下一堂可用狀態，讓品質與耐力課能持續成立。"
+    elif dominant == "Build":
+        title = "主刺激明確的建構月"
+        body = "這個月的重點比較直接：用多堂主刺激把能力往前推。接下來真正要看的，是恢復與銜接有沒有跟上。"
+    elif dominant == "Recover":
+        title = "以吸收為主的調整月"
+        body = "這個月最常出現的是恢復義務，代表訓練不是只往前堆，而是在整理前面累積的負荷，讓身體重新變得可用。"
+    elif dominant == "Activate":
+        title = "以重新啟動為主的銜接月"
+        body = "這個月有較多課在把腿感、節奏或跑步狀態接回來，重點是恢復訓練節奏，而不是直接堆更大的刺激。"
+    else:
+        label, _description = wsi_label(WSI_MISSION_LABELS, dominant)
+        title = f"以{label}為主的訓練月"
+        body = "這個月的主要訓練角色已經開始浮現，但仍需要更多標註與前後脈絡來提高月層級判讀品質。"
+
+    supporting = []
+    if build_count:
+        supporting.append(f"{build_count} 堂主刺激負責把能力往前推")
+    if prepare_count:
+        supporting.append(f"{prepare_count} 堂銜接課負責讓下一堂接得起來")
+    if recover_count:
+        supporting.append(f"{recover_count} 堂恢復課負責整理負荷")
+    if activate_count:
+        supporting.append(f"{activate_count} 堂重新啟動負責接回節奏")
+    if ready_count:
+        supporting.append(f"{ready_count} 堂把序列推到可用狀態")
+    if partial_count:
+        supporting.append(f"{partial_count} 堂完成度需要保守看")
+
+    return {
+        "title": title,
+        "body": body,
+        "supporting": supporting[:4],
+    }
+
+
+def wsi_period_prompt_lines(summary):
+    if not summary:
+        return []
+    dominant_label = "—"
+    dominant_missions = summary.get("dominantMissions") or ([summary["dominantMission"]] if summary["dominantMission"] else [])
+    if dominant_missions:
+        dominant_label = " / ".join(
+            wsi_label(WSI_MISSION_LABELS, mission)[0]
+            for mission in dominant_missions
+        )
+    mission_parts = []
+    for mission in ["Build", "Prepare", "Recover", "Activate"]:
+        count = summary["missionCounts"].get(mission, 0)
+        if not count:
+            continue
+        label, _description = wsi_label(WSI_MISSION_LABELS, mission)
+        mission_parts.append(f"{label} {count}")
+    continuity_parts = []
+    for state in ["Ready", "Maintained", "Overloaded"]:
+        count = summary["continuityCounts"].get(state, 0)
+        if not count:
+            continue
+        label, _description = wsi_label(WSI_CONTINUITY_LABELS, state)
+        continuity_parts.append(f"{label} {count}")
+    lines = [
+        f"- 期間：{summary['startDate']} – {summary['endDate']}",
+        f"- 主要序列角色：{dominant_label}",
+        f"- 任務分布：{', '.join(mission_parts) if mission_parts else '尚未形成'}",
+        f"- 序列狀態：{', '.join(continuity_parts) if continuity_parts else '尚未形成'}",
+        f"- 資料信心：{summary['usableCount']}/{summary['total']} 可用；需要補標註 {summary['needsAnnotationCount']} 堂",
+        f"- 序列讀法：{wsi_period_interpretation(summary)}",
+    ]
+    learning = monthly_wsi_learning(summary)
+    if learning:
+        lines.extend([
+            f"- 本月位置：{learning['title']}",
+            f"- 月層級教練判讀：{learning['body']}",
+        ])
+    return lines
+
+
+def wsi_period_panel(summary):
+    if not summary:
+        return ""
+
+    mission_order = ["Build", "Prepare", "Recover", "Activate"]
+    mission_items = []
+    for mission in mission_order:
+        count = summary["missionCounts"].get(mission, 0)
+        if not count:
+            continue
+        label, description = wsi_label(WSI_MISSION_LABELS, mission)
+        examples = []
+        for item in summary.get("missionExamples", {}).get(mission, [])[:4]:
+            distance = format_number(item.get("distanceKm"), 2)
+            distance_text = f" · {distance} km" if distance else ""
+            activity_href = "/?" + urlencode({"page": "activity", "activity": item.get("activityId")})
+            examples.append(
+                f"""
+                <li>
+                  <a href="{html.escape(activity_href, quote=True)}">
+                    <span>{html.escape(str(item.get("date") or ""))}</span>
+                    <strong>{html.escape(str(item.get("label") or "活動"))}{html.escape(distance_text)}</strong>
+                  </a>
+                </li>
+                """
+            )
+        hidden_count = max(0, count - len(examples))
+        hidden_note = f'<li class="wsi-mission-more">另外 {hidden_count} 堂</li>' if hidden_count else ""
+        example_html = f"""
+              <ul class="wsi-mission-list">
+                {"".join(examples)}
+                {hidden_note}
+              </ul>
+        """ if examples else ""
+        mission_items.append(
+            f"""
+            <div class="review-card">
+              <span>{html.escape(label)}</span>
+              <strong>{html.escape(str(count))} 堂</strong>
+              <p>{html.escape(description)}</p>
+              {example_html}
+            </div>
+            """
+        )
+    if not mission_items:
+        mission_items.append(
+            """
+            <div class="review-card">
+              <span>尚未形成分布</span>
+              <strong>—</strong>
+              <p>這段期間還沒有可用的 WSI 結果。</p>
+            </div>
+            """
+        )
+
+    dominant_label = "—"
+    dominant_missions = summary.get("dominantMissions") or ([summary["dominantMission"]] if summary["dominantMission"] else [])
+    if dominant_missions:
+        dominant_label = " / ".join(
+            wsi_label(WSI_MISSION_LABELS, mission)[0]
+            for mission in dominant_missions
+        )
+
+    period_label = summary["periodLabel"]
+    interpretation = wsi_period_interpretation(summary)
+    monthly_learning = monthly_wsi_learning(summary)
+    monthly_learning_html = ""
+    if monthly_learning:
+        supporting_html = ""
+        if monthly_learning["supporting"]:
+            supporting_html = f"""
+              <div class="wsi-month-supporting">
+                {"".join(f"<span>{html.escape(item)}</span>" for item in monthly_learning["supporting"])}
+              </div>
+            """
+        monthly_learning_html = f"""
+          <div class="wsi-month-hero">
+            <span>這個月的位置</span>
+            <strong>{html.escape(monthly_learning["title"])}</strong>
+            <p>{html.escape(monthly_learning["body"])}</p>
+            {supporting_html}
+          </div>
+        """
+    annotation_hint = ""
+    if summary["needsAnnotationCount"]:
+        low_confidence_count = int(summary["needsAnnotationCount"])
+        annotation_hint = f"""
+          <p class="note">有 {low_confidence_count} 堂資料信心較低。這通常不是 WSI 壞掉，而是活動標註或前後脈絡還不夠清楚。</p>
+        """
+
+    return f"""
+      <section class="panel-section" id="{html.escape(period_label)}-sequence-intelligence">
+        <h2>{html.escape(period_label)}訓練重點</h2>
+        <p class="note">這裡不是重算單堂課，而是把這段期間的活動放回前後脈絡裡，看主要在建立能力、準備下一堂、吸收恢復，還是重新啟動節奏。</p>
+        {monthly_learning_html}
+        <div class="metric-grid training-kpi-grid briefing-evidence-grid">
+          {activity_driver_card('主要序列角色', dominant_label, f'{period_label}出現最多的訓練序列角色。')}
+          {activity_driver_card('資料信心', f"{summary['usableCount']}/{summary['total']} 可用", '可用代表目前標註與前後活動足以支撐序列判讀。')}
+          {activity_driver_card('需要補標註', f"{summary['needsAnnotationCount']} 堂", '這些活動會先保守判讀，補標註後週/月理解會更穩。')}
+        </div>
+        <div class="coach-summary review-summary">
+          <span>這段期間的序列讀法</span>
+          <p>{html.escape(interpretation)}</p>
+          {annotation_hint}
+        </div>
+        <div class="metric-grid briefing-evidence-grid">
+          {"".join(mission_items)}
+        </div>
+      </section>
+    """
+
+
+def activity_wsi_panel(wsi, activity_id=None):
+    if not wsi:
+        return ""
+    mission_label, mission_description = wsi_label(WSI_MISSION_LABELS, wsi["missionCategory"])
+    status_label, status_description = wsi_label(WSI_STATUS_LABELS, wsi["missionStatus"])
+    continuity_label, continuity_description = wsi_label(WSI_CONTINUITY_LABELS, wsi["continuityState"])
+    evidence_label, evidence_description = wsi_label(
+        WSI_EVIDENCE_LABELS,
+        wsi.get("evidenceQuality", "usable"),
+    )
+    needs_annotation = wsi.get("evidenceQuality") == "needs_annotation"
+    confidence_class = "watch" if needs_annotation else "balanced"
+    continuity_class = {
+        "Ready": "ready",
+        "Maintained": "maintained",
+        "Overloaded": "overloaded",
+    }.get(wsi["continuityState"], "maintained")
+    outcome_headline = wsi_product_outcome(wsi["continuityState"])
+    coach_explanation = wsi_product_coach_explanation(wsi)
+    previous = wsi_context_workout(wsi, "previousWorkout")
+    next_workout = wsi_context_workout(wsi, "nextWorkout")
+    previous_label = wsi_context_label(previous) or "目前沒有前一堂資料"
+    next_label = wsi_context_label(next_workout) or "目前沒有已知後續活動"
+    annotation_link = ""
+    if needs_annotation and activity_id:
+        annotation_href = "/?" + urlencode({"page": "metadata", "edit": activity_id, "scope": "all"}) + "#metadata-edit"
+        annotation_link = f'<a class="button secondary" href="{html.escape(annotation_href, quote=True)}">先補這筆標註</a>'
+    evidence_warning = ""
+    if needs_annotation:
+        evidence_warning = f"""
+          <div class="coach-summary review-summary">
+            <span>判讀信心較低</span>
+            <p>{html.escape(wsi.get('evidenceNote') or '這筆活動需要先補標註，WSI 才會更穩。')}</p>
+            {annotation_link}
+          </div>
+        """
+    refresh_form = ""
+    if activity_id:
+        refresh_form = f"""
+          <form method="post" action="/activity/recompute-wsi" class="knowledge-action-form remember-scroll-form">
+            <input type="hidden" name="activity_id" value="{int(activity_id)}">
+            <input type="hidden" name="scroll_y" value="">
+            <button class="secondary-action" type="submit">重新產生序列理解</button>
+          </form>
+        """
+    return f"""
+      <section class="panel-section" id="activity-sequence-intelligence">
+        <h2>訓練序列理解</h2>
+        <div class="review-card knowledge-conversation-card activity-compact-card wsi-product-card">
+          <div class="wsi-card-head">
+            <div>
+              <span>這不是單堂課評分，而是把這堂課放回前後訓練裡看。</span>
+              <p class="note">CoachOS 會先看前一堂、這一堂與目前已知的後續活動，再判斷今天是在建立能力、準備下一堂、吸收恢復，還是重新啟動節奏。</p>
+            </div>
+            <span class="status-badge {confidence_class}">{html.escape(evidence_label)}</span>
+          </div>
+          {evidence_warning}
+          <div class="wsi-hero">
+            <span>今天這堂課的位置</span>
+            <strong>{html.escape(mission_label)}</strong>
+            <p>{html.escape(wsi['missionPhrase'])}</p>
+          </div>
+          <div class="wsi-outcome-card {html.escape(continuity_class)}">
+            <span>現在可以往下一堂了嗎？</span>
+            <strong>{html.escape(outcome_headline)}</strong>
+            <p>{html.escape(continuity_description)}</p>
+          </div>
+          <div class="metric-grid briefing-evidence-grid wsi-status-grid">
+            {activity_driver_card('任務完成度', status_label, status_description)}
+            {activity_driver_card('序列狀態', continuity_label, continuity_description)}
+          </div>
+          <div class="knowledge-because">
+            <span>教練怎麼看</span>
+            <p>{html.escape(coach_explanation)}</p>
+          </div>
+          <div class="wsi-evidence-row">
+            <span>前一堂：{html.escape(previous_label)}</span>
+            <span>下一堂：{html.escape(next_label)}</span>
+          </div>
+          <details class="wsi-raw-reasoning">
+            <summary>查看平台判讀依據</summary>
+            <p>{html.escape(wsi['sequenceReasoning'])}</p>
+            <p class="note">資料信心：{html.escape(evidence_label)}。{html.escape(evidence_description)}</p>
+          </details>
+          <div class="knowledge-actions">
+            {refresh_form}
+          </div>
+        </div>
+      </section>
+    """
+
+
+def activity_ai_handoff_panel(activity, review, split_rows, workout_split_rows=None, weekly_review=None, monthly_overview=None, wsi=None, saved_reply=None):
     handoff_text = activity_ai_handoff_text(
         activity,
         review,
@@ -8943,6 +9543,7 @@ def activity_ai_handoff_panel(activity, review, split_rows, workout_split_rows=N
         workout_split_rows,
         weekly_review,
         monthly_overview,
+        wsi,
         include_raw_data=True,
         saved_reply=saved_reply,
     )
@@ -9027,6 +9628,7 @@ def activity_review_panel(
     coach_step=None,
     weekly_review=None,
     monthly_overview=None,
+    wsi=None,
     saved_reply=None,
 ):
     if not activity:
@@ -9112,7 +9714,8 @@ def activity_review_panel(
         <p class="note">先看教練停在哪幾段，再一路往下核對那一段的實際分段。</p>
         {activity_fragment_table(activity, split_rows, workout_split_rows)}
       </section>
-      {activity_ai_handoff_panel(activity, review, split_rows, workout_split_rows, weekly_review, monthly_overview, saved_reply)}
+      {activity_wsi_panel(wsi, activity["activity_id"] if activity else None)}
+      {activity_ai_handoff_panel(activity, review, split_rows, workout_split_rows, weekly_review, monthly_overview, wsi, saved_reply)}
     """
 
 
@@ -9344,7 +9947,7 @@ def journey_page_panel(story, timeline_rows, turning_point_rows, available_month
     """
 
 
-def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality_row, history_rows, distribution_rows, key_session_rows, workout_structure_summary_rows, related_week_rows, available_month_rows, selected_month, knowledge_summary=None, coach_memory=None, saved_reply=None):
+def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality_row, history_rows, distribution_rows, key_session_rows, workout_structure_summary_rows, related_week_rows, available_month_rows, selected_month, knowledge_summary=None, coach_memory=None, wsi_summary=None, saved_reply=None):
     if not monthly or not intelligence:
         return """
         <section class="panel-section">
@@ -9499,7 +10102,8 @@ def monthly_review_panel(monthly, intelligence, progress_row, assignment_quality
         <h2>教練看了哪些關鍵課</h2>
         {monthly_key_sessions_table(key_session_rows)}
       </section>
-      {monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_rows, key_session_rows, workout_structure_summary_rows, related_week_rows, coach_memory, knowledge_summary, saved_reply)}
+      {wsi_period_panel(wsi_summary)}
+      {monthly_ai_handoff_panel(monthly, intelligence, progress_row, distribution_rows, key_session_rows, workout_structure_summary_rows, related_week_rows, coach_memory, knowledge_summary, wsi_summary, saved_reply)}
     """
 
 
@@ -9515,6 +10119,7 @@ def weekly_review_panel(
     knowledge_summary=None,
     monthly_overview=None,
     overview_attention=None,
+    wsi_summary=None,
     saved_reply=None,
 ):
     if not weekly or not intelligence:
@@ -9610,7 +10215,8 @@ def weekly_review_panel(
         <h2>最近 5 週節奏</h2>
         {weekly_history_table(history_rows, selected_week)}
       </section>
-      {weekly_ai_handoff_panel(weekly, intelligence, review, distribution_rows, key_session_rows, workout_structure_summary_rows, history_rows, history_rows_with_labels, monthly_overview, overview_attention, knowledge_summary, saved_reply)}
+      {wsi_period_panel(wsi_summary)}
+      {weekly_ai_handoff_panel(weekly, intelligence, review, distribution_rows, key_session_rows, workout_structure_summary_rows, history_rows, history_rows_with_labels, monthly_overview, overview_attention, knowledge_summary, wsi_summary, saved_reply)}
     """
 
 
@@ -11686,6 +12292,211 @@ def base_styles():
       font-size: 20px;
       line-height: 1.25;
     }
+    .wsi-product-card {
+      gap: 16px;
+    }
+    .wsi-card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: start;
+    }
+    .wsi-card-head .note {
+      margin-top: 8px;
+    }
+    .wsi-hero {
+      display: grid;
+      gap: 8px;
+      padding: 18px;
+      border-radius: 20px;
+      border: 1px solid #cfe1ed;
+      background: linear-gradient(135deg, #eef8f6 0%, #f7fbfd 100%);
+    }
+    .wsi-hero span,
+    .wsi-outcome-card span,
+    .wsi-raw-reasoning summary {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .wsi-hero strong {
+      color: var(--ink);
+      font-size: clamp(34px, 4.4vw, 58px);
+      letter-spacing: -0.04em;
+      line-height: 0.95;
+    }
+    .wsi-hero p {
+      margin: 0;
+      color: var(--ink);
+      font-size: 18px;
+      font-weight: 850;
+      line-height: 1.5;
+    }
+    .wsi-outcome-card {
+      display: grid;
+      gap: 8px;
+      padding: 18px;
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: #fff;
+      box-shadow: 0 14px 36px rgba(22, 36, 58, 0.08);
+    }
+    .wsi-outcome-card.ready {
+      border-color: #bce5db;
+      background: linear-gradient(135deg, #e7f8f2 0%, #f7fcf9 100%);
+    }
+    .wsi-outcome-card.maintained {
+      border-color: #cfe1ed;
+      background: linear-gradient(135deg, #eef6fb 0%, #ffffff 100%);
+    }
+    .wsi-outcome-card.overloaded {
+      border-color: #f3c7ae;
+      background: linear-gradient(135deg, #fff1e8 0%, #ffffff 100%);
+    }
+    .wsi-outcome-card strong {
+      color: var(--ink);
+      font-size: clamp(28px, 3.2vw, 44px);
+      letter-spacing: -0.035em;
+      line-height: 1;
+    }
+    .wsi-outcome-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 16px;
+      font-weight: 800;
+      line-height: 1.55;
+    }
+    .wsi-status-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .wsi-evidence-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding-top: 4px;
+    }
+    .wsi-evidence-row span {
+      display: inline-flex;
+      min-height: 34px;
+      align-items: center;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #f8fbfd;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 850;
+    }
+    .wsi-raw-reasoning {
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #fbfdfe;
+    }
+    .wsi-raw-reasoning summary {
+      cursor: pointer;
+    }
+    .wsi-raw-reasoning p {
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-weight: 750;
+      line-height: 1.6;
+    }
+    .wsi-mission-list {
+      display: grid;
+      gap: 8px;
+      margin: 4px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+    .wsi-mission-list li {
+      margin: 0;
+      padding: 0;
+    }
+    .wsi-mission-list a,
+    .wsi-mission-more {
+      display: grid;
+      gap: 2px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #f8fbfd;
+      color: inherit;
+    }
+    .wsi-mission-list a:hover {
+      border-color: #b6d2e2;
+      background: #eef6fb;
+    }
+    .wsi-mission-list span {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .wsi-mission-list strong {
+      color: var(--ink);
+      font-size: 15px;
+      line-height: 1.25;
+    }
+    .wsi-mission-more {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 850;
+    }
+    .wsi-month-hero {
+      display: grid;
+      gap: 10px;
+      margin: 14px 0;
+      padding: 22px;
+      border: 1px solid #cfe1ed;
+      border-radius: 24px;
+      background: linear-gradient(135deg, #eef6fb 0%, #f8fcfb 100%);
+      box-shadow: 0 16px 36px rgba(22, 36, 58, 0.07);
+    }
+    .wsi-month-hero span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .wsi-month-hero strong {
+      color: var(--ink);
+      font-size: clamp(30px, 3.6vw, 50px);
+      letter-spacing: -0.04em;
+      line-height: 0.98;
+    }
+    .wsi-month-hero p {
+      max-width: 900px;
+      margin: 0;
+      color: var(--ink);
+      font-size: 18px;
+      font-weight: 850;
+      line-height: 1.55;
+    }
+    .wsi-month-supporting {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 4px;
+    }
+    .wsi-month-supporting span {
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      padding: 0 12px;
+      border-radius: 999px;
+      border: 1px solid #cfe1ed;
+      background: #fff;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 850;
+      letter-spacing: 0;
+      text-transform: none;
+    }
     .today-panel {
       display: grid;
       grid-template-columns: 0.7fr 1.4fr 1fr;
@@ -13704,6 +14515,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     distribution_rows = []
     weekly_key_session_rows = []
     weekly_workout_structure_summary_rows = []
+    weekly_wsi_summary = None
     month_rows = []
     monthly = None
     selected_month = ""
@@ -13716,6 +14528,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     monthly_workout_structure_summary_rows = []
     monthly_related_week_rows = []
     monthly_assignment_quality_row = None
+    monthly_wsi_summary = None
     journey_selected_story = None
     journey_timeline_rows = []
     journey_turning_rows = []
@@ -13751,6 +14564,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     selected = None
     split_rows = []
     workout_split_rows = []
+    wsi = None
     today = None
     overview_attention = None
 
@@ -13772,12 +14586,24 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
             distribution_rows = selected_week_distribution(connection, selected_week or None, limit=6)
             weekly_key_session_rows = selected_week_key_sessions(connection, selected_week or None)
             weekly_workout_structure_summary_rows = key_session_workout_structure_summary(connection, weekly_key_session_rows)
+            if weekly:
+                weekly_wsi_summary = wsi_period_summary(
+                    connection,
+                    weekly["start_date"],
+                    weekly["end_date"],
+                    "本週",
+                )
 
         elif page == "activity":
             activity_rows = available_activities(connection)
             selected = selected_activity(connection, int(activity_id) if str(activity_id).isdigit() else None)
             split_rows = splits(connection, selected["activity_id"] if selected else None)
             workout_split_rows = workout_structure_splits(connection, selected["activity_id"] if selected else None)
+            if selected:
+                wsi = get_activity_wsi(connection, selected["activity_id"])
+                if not wsi:
+                    wsi = recompute_activity_wsi(connection, selected["activity_id"])
+                    connection.commit()
             _dropdown_options, activity_shoe_rows, activity_workout_rows, activity_purpose_rows, _activity_workout_purpose_rows = metadata_choice_sets(connection)
             weekly = week_summary(connection)
             intelligence = weekly_intelligence(connection)
@@ -13808,6 +14634,13 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
             monthly_workout_structure_summary_rows = key_session_workout_structure_summary(connection, monthly_key_session_rows)
             monthly_related_week_rows = selected_month_related_weeks(connection, selected_month or None, limit=5)
             monthly_assignment_quality_row = selected_month_assignment_quality(connection, selected_month or None)
+            if monthly:
+                monthly_wsi_summary = wsi_period_summary(
+                    connection,
+                    monthly["month_start"],
+                    monthly["month_end"],
+                    "本月",
+                )
 
         elif page == "shoes":
             shoe_rows = shoes_overview(connection)
@@ -13909,7 +14742,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
     if page == "weekly":
         return f"""{html_start}
     {weekly_selector_bar(week_rows, selected_week, "weekly")}
-    {weekly_review_panel(weekly, intelligence, weekly_rows, distribution_rows, weekly_key_session_rows, weekly_workout_structure_summary_rows, selected_week, weekly_rows_with_labels, weekly_knowledge_summary, monthly_overview, overview_attention, weekly_ai_reply)}
+    {weekly_review_panel(weekly, intelligence, weekly_rows, distribution_rows, weekly_key_session_rows, weekly_workout_structure_summary_rows, selected_week, weekly_rows_with_labels, weekly_knowledge_summary, monthly_overview, overview_attention, weekly_wsi_summary, weekly_ai_reply)}
     {archive_metric_strip(summary)}
   </main>
 </body>
@@ -13917,7 +14750,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
 
     if page == "activity":
         return f"""{html_start}
-    {activity_review_panel(selected, split_rows, workout_split_rows, activity_rows, selected["activity_id"] if selected else "", activity_shoe_rows, activity_workout_rows, activity_purpose_rows, coach_step, weekly_review, monthly_overview, activity_ai_reply)}
+    {activity_review_panel(selected, split_rows, workout_split_rows, activity_rows, selected["activity_id"] if selected else "", activity_shoe_rows, activity_workout_rows, activity_purpose_rows, coach_step, weekly_review, monthly_overview, wsi, activity_ai_reply)}
     {archive_metric_strip(summary)}
   </main>
 </body>
@@ -13933,7 +14766,7 @@ def render_dashboard(activity_id="", page="home", edit_activity_id="", scope="un
 
     if page == "monthly":
         return f"""{html_start}
-    {monthly_review_panel(monthly, monthly_review, monthly_progress_row, monthly_assignment_quality_row, monthly_rows, monthly_distribution_rows, monthly_key_session_rows, monthly_workout_structure_summary_rows, monthly_related_week_rows, month_rows, selected_month, monthly_knowledge_summary, monthly_memory, monthly_ai_reply)}
+    {monthly_review_panel(monthly, monthly_review, monthly_progress_row, monthly_assignment_quality_row, monthly_rows, monthly_distribution_rows, monthly_key_session_rows, monthly_workout_structure_summary_rows, monthly_related_week_rows, month_rows, selected_month, monthly_knowledge_summary, monthly_memory, monthly_wsi_summary, monthly_ai_reply)}
   </main>
 </body>
 </html>"""
@@ -14311,6 +15144,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             "",
                             provenance_source="coach_knowledge",
                         )
+                    recompute_activity_wsi(connection, activity_id)
                     connection.commit()
 
             if action == "skip" and coach_step in {"shoe", "workout", "purpose"}:
@@ -14351,6 +15185,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     secondary_code,
                     provenance_source="manual",
                 )
+                recompute_activity_wsi(connection, activity_id)
                 connection.commit()
 
             location = "/?" + urlencode(
@@ -14362,6 +15197,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "message": "標註已儲存",
                 }
             )
+            if scroll_y:
+                location += "&" + urlencode({"scroll_y": scroll_y})
+            self.redirect(location)
+            return
+
+        if parsed.path == "/activity/recompute-wsi":
+            form = parse_qs(body.decode("utf-8"))
+            activity_id = int(first_form_value(form, "activity_id", "0") or "0")
+            scroll_y = first_form_value(form, "scroll_y", "").strip()
+            with connect() as connection:
+                recompute_activity_wsi(connection, activity_id)
+                connection.commit()
+            location = "/?" + urlencode(
+                {
+                    "page": "activity",
+                    "activity": activity_id,
+                    "message": "訓練序列理解已重新產生",
+                }
+            ) + "#activity-sequence-intelligence"
             if scroll_y:
                 location += "&" + urlencode({"scroll_y": scroll_y})
             self.redirect(location)
@@ -14388,6 +15242,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     secondary_code,
                     provenance_source="manual",
                 )
+                for activity_id in activity_ids:
+                    recompute_activity_wsi(connection, activity_id)
                 connection.commit()
 
             message = "尚未選取活動" if updated == 0 else f"已更新 {updated} 筆活動"

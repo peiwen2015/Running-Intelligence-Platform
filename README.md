@@ -6,13 +6,14 @@
 
 ## Release Status
 
-- `v1.3.6` 已正式發布
+- `v1.4.0` 正在整理為下一個正式版本
 - 產品對外主名稱維持 `CoachOS`
 - 核心資料鏈路已固定為 `FIT -> Excel -> SQLite -> Semantic Layer -> Dashboard`
-- `Connected Coach Knowledge` 已接進 `Activity -> Weekly -> Monthly -> AI 交棒`
+- `Workout Sequence Intelligence` 已接進 `Activity -> Weekly -> Monthly -> AI 交棒`
 - `AI 延伸分析` 可把整理結果複製給 AI，並可將回覆寫回頁面
 - `每日 / 每週 / 每月訓練圖卡 prompt` 已可直接從平台交給圖像 AI
 - `GPS backfill`、`課表結構 backfill` 與 `心率 / 欄位修補` 已可回補到 Excel 與 SQLite
+- `訓練序列理解` 可從資料匯入工具批次重算並寫回 SQLite，Excel 仍保持單純
 
 目前產品由兩個一起工作的本機小程式組成：
 
@@ -27,10 +28,10 @@
 
 CoachOS 現在主要提供四個產品面：
 
-- `Activity`：這堂課，我真正練到了什麼？
+- `Activity`：今天這堂課，在整個訓練中的位置是什麼？
 - `Overview`：今天，我最該關心的是什麼？
-- `Weekly`：這週，我到底練到了什麼？
-- `Monthly`：我現在在哪？
+- `Weekly`：這週真正留下來的是什麼？
+- `Monthly`：這個月最後建立了什麼？
 - `Metadata / Settings`：補標註、修正來源、管理鞋款與課表對照
 - `AI 延伸分析`：把整理好的內容交給外部 AI 繼續分析，結果也能寫回頁面
 
@@ -119,6 +120,8 @@ Activity
 Weekly
 ↓
 Monthly
+↓
+AI Handoff
 ```
 
 ### Routine Flow
@@ -163,10 +166,10 @@ docs/      架構與產品文件
 
 ## 目前的產品狀態
 
-- `Activity`：Stable，已具備教練判讀、教練知識、證據、AI 交棒、每日圖卡 prompt
+- `Activity`：Stable，已具備教練判讀、教練知識、訓練序列理解、證據、AI 交棒、每日圖卡 prompt
 - `Overview`：Beta，作為注意力入口，已開始讀取 connected knowledge 狀態
-- `Weekly`：Stable，已讀取 confirmed 教練知識，並支援 AI 交棒 / 週圖卡 prompt
-- `Monthly`：Stable，已讀取 confirmed 教練知識，並支援 AI 交棒 / 月圖卡 prompt
+- `Weekly`：Stable，已讀取 confirmed 教練知識與訓練序列理解，並支援 AI 交棒 / 週圖卡 prompt
+- `Monthly`：Stable，已讀取 confirmed 教練知識與訓練序列理解，並支援 AI 交棒 / 月圖卡 prompt
 - `Metadata / Settings`：Stable，已具備建議值、provenance、補標註與鞋款狀態管理
 - `Shoes`：Beta，已可進行鞋款狀態調整，但仍會持續收斂
 
@@ -186,19 +189,20 @@ docs/      架構與產品文件
 
 ## 對外發布方向
 
-這個 repo 現在反映的是正式對外的 `v1.3.6` 狀態，主題仍是 `Connected Coach Knowledge`：
+這個 repo 現在正在整理 `v1.4.0`，主題是 `Workout Sequence Intelligence Product Layer`：
 
 - 統一名稱：`CoachOS`
 - 把資料匯入工具作為產品裡的資料入口，而不是獨立散落的小工具
 - 以 deterministic、本機可用、knowledge-first 的方式建立跑步教練產品
-- 讓 `Activity` 裡確認的知識，實際回流到 `Weekly / Monthly / AI 交棒`
+- 讓 `Activity` 裡確認的知識與序列理解，實際回流到 `Weekly / Monthly / AI 交棒`
 - 讓 `課表結構`、`GPS`、`活動最高心率修補`、`每日 / 每週 / 每月圖卡 prompt` 成為日常使用的一部分
-- 把活動頁、批次工具與 Excel 欄位口徑整理成更一致的繁體中文
+- 把 Activity / Weekly / Monthly 的 WSI 翻譯成一致的教練語言
+- 保持 Excel 單純，讓 WSI 留在 SQLite 與 CoachOS 產品層
 
-`v1.3.6` 之後的下一步，不再只是把資料接進來，而是繼續收斂：
+`v1.4.0` 之後的下一步，不再只是把 WSI 放進頁面，而是繼續收斂：
 
-- 課表結構驅動的 Activity 判讀口徑
-- 更穩定的本機 daily use flow
+- Overview 接上同一套跨時間尺度的教練語言
+- WSI rule review 與 validation evidence 持續回饋產品
 - 為後續 `Memory / Belief` 階段保留乾淨的產品基礎
 
 正式發布說明與版本備註可參考：
@@ -214,6 +218,10 @@ docs/      架構與產品文件
 [`RELEASE_NOTES_v1.3.6.md`](/Users/perryliu/Documents/Running%20Analytics/RELEASE_NOTES_v1.3.6.md)
 
 [`RELEASE_ANNOUNCEMENT_v1.3.6.md`](/Users/perryliu/Documents/Running%20Analytics/RELEASE_ANNOUNCEMENT_v1.3.6.md)
+
+[`RELEASE_NOTES_v1.4.0.md`](/Users/perryliu/Documents/Running%20Analytics/RELEASE_NOTES_v1.4.0.md)
+
+[`RELEASE_ANNOUNCEMENT_v1.4.0.md`](/Users/perryliu/Documents/Running%20Analytics/RELEASE_ANNOUNCEMENT_v1.4.0.md)
 
 [`docs/00_Governance/CoachOS Product Roadmap v1.0 Draft.md`](/Users/perryliu/Documents/Running%20Analytics/docs/00_Governance/CoachOS%20Product%20Roadmap%20v1.0%20Draft.md)
 

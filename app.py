@@ -41,6 +41,7 @@ from fit_to_excel import (
     write_fit_to_sqlite,
 )
 from repair_hr_artifacts import backfill_sqlite_activity_max_hr, repair_excel_workbooks
+from analysis_platform.wsi_engine import ensure_activity_wsi_table, recompute_all_activity_wsi
 
 
 ROOT = Path(__file__).resolve().parent
@@ -52,7 +53,13 @@ HOST = "127.0.0.1"
 PORT = 8765
 PLATFORM_URL = "http://127.0.0.1:8766/"
 EXCEL_FORMAT_VERSION = WORKBOOK_VERSION_NAME
-EXCEL_SCHEMA_LABEL = EXCEL_FORMAT_VERSION.replace("跑步分析資料 ", "Excel Schema ")
+EXCEL_SCHEMA_LABEL = EXCEL_FORMAT_VERSION.replace("跑步分析資料 ", "Excel 格式 ")
+WSI_MISSION_LABELS = {
+    "Build": "建立能力",
+    "Prepare": "準備下一堂",
+    "Recover": "吸收恢復",
+    "Activate": "重新啟動",
+}
 DEFAULT_FIT_LIST_LIMIT = 30
 DOWNLOAD_JOBS = {}
 DOWNLOAD_JOBS_LOCK = threading.Lock()
@@ -235,7 +242,7 @@ def workbook_workout_structure_label(workbook_or_path):
     if str(has_structure).strip().lower() == "yes":
         name = str(workout_name).strip() if workout_name not in ("", None) else "已帶入"
         if step_count not in ("", None):
-            return f"有（{name}，{step_count} steps）"
+            return f"有（{name}，{step_count} 步驟）"
         return f"有（{name}）"
     return "無"
 
@@ -346,7 +353,7 @@ def friendly_error(error):
     if "No lap data found" in text:
         return "這個 FIT 裡沒有可用的每公里分段資料，可能不是跑步活動，或檔案內容不完整。"
     if "FIT decode errors" in text:
-        return "FIT 檔解析失敗，請確認這是 Garmin Connect 匯出的 Original FIT 檔。"
+        return "FIT 檔解析失敗，請確認這是 Garmin Connect 匯出的原始 FIT 檔。"
     if "urlopen" in text or "Open-Meteo" in text:
         return "天氣查詢失敗。請確認網路可用，或先取消自動抓天氣完成轉檔。"
     return f"轉檔失敗：{text}"
@@ -747,7 +754,7 @@ def gps_backfill_status_table(month):
         activity_label = str(row["activity_name"] or row["activity_type"] or "活動")
         start_time = str(row["activity_start_time"]).replace("T", " ")[:16]
         fit_name = row["fit"] or "找不到對應 FIT"
-        match_label = "Garmin ID" if row["match_source"] == "activity_id" else ("原始檔名" if row["match_source"] == "source_file_name" else "需重新下載")
+        match_label = "Garmin 活動 ID" if row["match_source"] == "activity_id" else ("原始檔名" if row["match_source"] == "source_file_name" else "需重新下載")
         html_rows.append(
             f"""
             <tr>
@@ -788,7 +795,7 @@ def workout_structure_backfill_status_table(month):
         activity_label = str(row["activity_name"] or row["activity_type"] or "活動")
         start_time = str(row["activity_start_time"]).replace("T", " ")[:16]
         fit_name = row["fit"] or "找不到對應 FIT"
-        match_label = "Garmin ID" if row["match_source"] == "activity_id" else ("原始檔名" if row["match_source"] == "source_file_name" else "需重新下載")
+        match_label = "Garmin 活動 ID" if row["match_source"] == "activity_id" else ("原始檔名" if row["match_source"] == "source_file_name" else "需重新下載")
         html_rows.append(
             f"""
             <tr>
@@ -1053,6 +1060,32 @@ def hr_repair_result_html(job, job_id=""):
     return "".join(parts)
 
 
+def wsi_recompute_result_html(job, job_id=""):
+    result = job.get("result") or {}
+    month = html.escape(job.get("month", ""))
+    total = int(result.get("total", 0) or 0)
+    updated = int(result.get("updated", 0) or 0)
+    missing = int(result.get("missing", 0) or 0)
+    missions = result.get("missions") or {}
+    mission_text = "、".join(
+        f"{html.escape(WSI_MISSION_LABELS.get(str(key), str(key)))} {int(value)}"
+        for key, value in sorted(missions.items())
+    ) or "無"
+    parts = [
+        f"{month} 訓練序列理解重算完成。<br>",
+        f"更新：<code>{updated}</code> / <code>{total}</code> 筆<br>",
+        f"未產生：<code>{missing}</code> 筆<br>",
+        f"序列角色分布：{mission_text}<br>",
+        f"SQLite：<code>{html.escape(str(SQLITE_DB_PATH))}</code><br>",
+    ]
+    parts.append(
+        "<br>"
+        f'<a class="button" href="{html.escape(PLATFORM_URL, quote=True)}">回 CoachOS 分析平台</a> '
+        f'<a class="button secondary" href="/batch-convert?month={html.escape(job.get("month", ""), quote=True)}">回批次轉檔</a>'
+    )
+    return "".join(parts)
+
+
 def gps_backfill_result_html(job, job_id=""):
     result = job.get("result") or {}
     month = html.escape(job.get("month", ""))
@@ -1081,7 +1114,7 @@ def gps_backfill_result_html(job, job_id=""):
                 f"{html.escape(item['activity_name'])}"
             )
             if item.get("garmin_activity_id"):
-                parts.append(f" · Garmin ID <code>{html.escape(str(item['garmin_activity_id']))}</code>")
+                parts.append(f" · Garmin 活動 ID <code>{html.escape(str(item['garmin_activity_id']))}</code>")
             parts.append("<br>")
         if len(missing) > 20:
             parts.append(f"...另有 {len(missing) - 20} 筆缺 FIT<br>")
@@ -1142,7 +1175,7 @@ def workout_structure_backfill_result_html(job, job_id=""):
                 f"{html.escape(item['activity_name'])}"
             )
             if item.get("garmin_activity_id"):
-                parts.append(f" · Garmin ID <code>{html.escape(str(item['garmin_activity_id']))}</code>")
+                parts.append(f" · Garmin 活動 ID <code>{html.escape(str(item['garmin_activity_id']))}</code>")
             parts.append("<br>")
         if len(missing) > 20:
             parts.append(f"...另有 {len(missing) - 20} 筆缺 FIT<br>")
@@ -1273,6 +1306,8 @@ def batch_job_snapshot(job_id):
     if snapshot["status"] == "done":
         if job.get("job_type") == "hr_repair":
             snapshot["result_html"] = hr_repair_result_html(job, job_id)
+        elif job.get("job_type") == "wsi_recompute":
+            snapshot["result_html"] = wsi_recompute_result_html(job, job_id)
         else:
             snapshot["result_html"] = batch_convert_result_html(job, job_id)
     return snapshot
@@ -1613,6 +1648,24 @@ def run_hr_repair_job(job_id, month):
     )
 
 
+def run_wsi_recompute_job(job_id, month):
+    update_batch_job(job_id, total=1, current=0, message=f"正在重算 {month} 的訓練序列理解...")
+    bootstrap_sqlite_state(SQLITE_DB_PATH)
+    with sqlite3.connect(SQLITE_DB_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        ensure_activity_wsi_table(connection)
+        result = recompute_all_activity_wsi(connection, month)
+        connection.commit()
+    update_batch_job(
+        job_id,
+        status="done",
+        current=1,
+        total=1,
+        result=result,
+        message="訓練序列理解重算完成。",
+    )
+
+
 def start_batch_convert_job(month, metadata, fetch_weather, overwrite_newer, overwrite_all):
     job_id = uuid.uuid4().hex
     with BATCH_JOBS_LOCK:
@@ -1667,6 +1720,27 @@ def start_hr_repair_job(month):
         }
     worker = threading.Thread(
         target=run_hr_repair_job,
+        args=(job_id, month),
+        daemon=True,
+    )
+    worker.start()
+    return job_id
+
+
+def start_wsi_recompute_job(month):
+    job_id = uuid.uuid4().hex
+    with BATCH_JOBS_LOCK:
+        BATCH_JOBS[job_id] = {
+            "status": "running",
+            "message": "準備重算 WSI...",
+            "current": 0,
+            "total": 0,
+            "month": month,
+            "edited": [],
+            "job_type": "wsi_recompute",
+        }
+    worker = threading.Thread(
+        target=run_wsi_recompute_job,
         args=(job_id, month),
         daemon=True,
     )
@@ -1941,7 +2015,7 @@ def product_banner(title="資料匯入工具"):
             <h1>{html.escape(title)}</h1>
             <p class="banner-subtitle">把 Garmin FIT 轉成 CoachOS 可讀的資料</p>
             <div class="flow">
-              <span>FIT Import</span>
+              <span>FIT 匯入</span>
               <span>{html.escape(EXCEL_SCHEMA_LABEL)}</span>
               <span>CoachOS</span>
             </div>
@@ -2639,7 +2713,7 @@ def render_download_fit_page(message="", error=""):
 <body>
   <main>
     {product_banner("下載 Garmin FIT")}
-    <p class="subtitle">從 Garmin Connect 下載指定月份的跑步活動 Original FIT，檔案會直接放進本專案的 FIT 資料夾，完成後可回到轉檔頁使用。</p>
+    <p class="subtitle">從 Garmin Connect 下載指定月份的跑步活動原始 FIT，檔案會直接放進本專案的 FIT 資料夾，完成後可回到轉檔頁使用。</p>
     {nav("download-fit")}
     {status_html(message, error)}
     <form method="post" action="/download-fit">
@@ -2864,11 +2938,21 @@ def render_batch_convert_page(message="", error="", selected_month=""):
         <button type="submit">修補這個月的既有資料</button>
       </div>
     </form>
+    <form method="post" action="/wsi-recompute">
+      <input type="hidden" name="month" value="{html.escape(selected_month, quote=True)}">
+      <fieldset>
+        <legend>重算訓練序列理解</legend>
+        <p class="note">這裡會依目前訓練序列理解規則重新產生本月活動的序列角色、任務完成度、序列狀態與教練解讀，並寫回 SQLite。這不會重轉 Excel，也不會改動原始活動資料。</p>
+      </fieldset>
+      <div class="actions">
+        <button type="submit">重算這個月的序列理解</button>
+      </div>
+    </form>
     <form method="post" action="/gps-backfill">
       <input type="hidden" name="month" value="{html.escape(selected_month, quote=True)}">
       <fieldset>
         <legend>補 GPS 到 SQLite</legend>
-        <p class="note">這裡只補 SQLite 缺掉的 GPS，不會重轉 Excel。系統會先用 Garmin Activity ID，其次用原始檔名去找對應 FIT；找不到時就提醒你重新下載。</p>
+        <p class="note">這裡只補 SQLite 缺掉的 GPS，不會重轉 Excel。系統會先用 Garmin 活動 ID，其次用原始檔名去找對應 FIT；找不到時就提醒你重新下載。</p>
         <div class="grid">
           <label>
             <span>月份</span>
@@ -2893,7 +2977,7 @@ def render_batch_convert_page(message="", error="", selected_month=""):
       <input type="hidden" name="month" value="{html.escape(selected_month, quote=True)}">
       <fieldset>
         <legend>補課表結構到 SQLite</legend>
-        <p class="note">這裡會從 FIT 補回結構化課表資訊到 SQLite，包括課表、課表步驟與分段類型。系統會先用 Garmin Activity ID，其次用原始檔名去找對應 FIT；找不到時就提醒你重新下載。若 FIT 本身沒有結構化課表，也會記成「已檢查」。</p>
+        <p class="note">這裡會從 FIT 補回結構化課表資訊到 SQLite，包括課表、課表步驟與分段類型。系統會先用 Garmin 活動 ID，其次用原始檔名去找對應 FIT；找不到時就提醒你重新下載。若 FIT 本身沒有結構化課表，也會記成「已檢查」。</p>
         <div class="grid">
           <label>
             <span>月份</span>
@@ -3368,6 +3452,18 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_html(render_batch_convert_page(error="這個月份沒有 FIT 檔。", selected_month=month), status=400)
                 return
             job_id = start_hr_repair_job(month)
+            self.send_html(render_batch_progress_page(job_id))
+            return
+
+        if parsed.path == "/wsi-recompute":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length)
+            form, _files = parse_post_data(self.headers, body)
+            month = first_value(form, "month")
+            if not re.fullmatch(r"\d{4}-\d{2}", month or ""):
+                self.send_html(render_batch_convert_page(error="請選擇有效月份。"), status=400)
+                return
+            job_id = start_wsi_recompute_job(month)
             self.send_html(render_batch_progress_page(job_id))
             return
 
